@@ -1,4 +1,4 @@
-import { ListArgs, Tuple, TupleDb, TupleTx } from "./types"
+import { ListArgs, Tuple, TupleDb } from "./types"
 
 export type TypeSchema = {
 	primary: string[]
@@ -42,7 +42,7 @@ export type RecordDb = {
 	}
 }
 
-export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema): RecordDb {
+export function recordDb(db: TupleDb, schema: RecordSchema): RecordDb {
 	function extractKey(obj: any, fields: string[]): Tuple {
 		return fields.map((f) => obj[f])
 	}

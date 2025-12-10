@@ -79,3 +79,29 @@ Lets cleanup the code a little bit more. I like things to be clean and concise. 
 
 Another thing thats missing is a `type RecordDb = {}`. Lets make sure to define that interface and be thoughtful about it.
 
+
+---
+
+I want to clean up the RecordDb abstraction a bit.
+- Ordering of tuples can be error prone and also confusing in the code because items in the tuple aren't labeled either. So lets try to pass named args and use the schema to unroll them into the correct order when possible.
+- I don't like `RecordListArgs` because I don't want prefix in there - that's what subspace is for. I actualy think we don't prefix or subspace though and ListArgs can take an object that gets unrolled into tupled before querying...
+
+Something like this is what I'm looking for.
+
+export type RecordDb = {
+	// Args here contain primary key properties.
+	get: (args: {type: string}) => {type: string} | undefined
+	delete: (args: {type: string}) => void
+
+	// These ares are the entire record.
+	set: (record: {type: string}) => void
+
+	// Use the schema to layout the keys appropriately
+	aggregation: (name: string, args: {[key: string]: any}) => number
+
+	// Scan the index and use the schema to unroll ListArgs into a tuple with the appropriate key ordering.
+	index: (type: string, name: string, args: ListArgs<{[key: string]: any}>) =>
+
+	// Do something similar here that makes sense for joins.
+}
+
