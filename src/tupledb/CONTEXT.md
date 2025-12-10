@@ -1,4 +1,3 @@
-
 I've created a simple foundationdb-inspired database in TypeScript. It leans heavily on functional composition.
 
 ```ts
@@ -263,8 +262,7 @@ Functions compose really well for writing to the database. You have full flexibi
 
 ```ts
 function fanoutSendMessage(tx: TupleDb, msg: Message) {
-	for (const to of msg)
-		tx.set(["inbox", to, msg.timestamp, msg.id], null)
+	for (const to of msg) tx.set(["inbox", to, msg.timestamp, msg.id], null)
 }
 
 function sendMessage(tx: TupleDb, msg: Message) {
@@ -278,4 +276,3 @@ const tx = tupleTx()
 sendMessage(tx, msg)
 tx.commit()
 ```
-

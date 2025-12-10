@@ -64,13 +64,13 @@ describe("Syncable", () => {
 		// Check root history
 		const history = user.history()
 		assert.equal(history.length, 1)
-		// History key should be preserved (no prefix in the history value's WriteArgs? 
+		// History key should be preserved (no prefix in the history value's WriteArgs?
 		// Wait, my implementation prefixes them!)
 		// Let's check the implementation again.
 		// syncableSubspace prefixes the keys before calling root.writeSyncable.
 		// So the history should contain the full key.
-		
-		assert.deepEqual(history[0].value.set[0].key, ["inbox", "msg1"])
+
+		assert.deepEqual(history[0].value.set?.[0]?.key, ["inbox", "msg1"])
 
 		// Check data retrieval
 		assert.equal(inbox.get(["msg1"]), "hello")
@@ -80,7 +80,7 @@ describe("Syncable", () => {
 	it("underlying db structure", () => {
 		const db = tupleDb()
 		const user = syncable(db)
-		
+
 		user.set(["a"], 1)
 
 		// Check actual DB keys

@@ -16,7 +16,6 @@
 		"noUnusedParameters": false,
 		"removeComments": true,
 
-		"jsx": "react",
 		"allowJs": true,
 
 		"sourceMap": true,
