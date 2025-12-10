@@ -41,11 +41,12 @@ New features should generally be implemented as wrappers around `Okv` rather tha
 ### 3. Testing
 * Framework: Using node:test (`npm test`).
 * Location: Co-located `*.test.ts` files.
+* Typecheck: Always verify no type errors after writing code (`npm run typecheck`).
 
 ### 4. Code Style
 * Formatting: Prettier (`npm run prettier`).
 * Imports: Use explicit relative paths.
-* Types: Strict TypeScript (`npm run typecheck`).
+* Types: Strict TypeScript
 
 ## Directory Structure
 * `src/tupledb/`: Core database logic.

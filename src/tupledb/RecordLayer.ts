@@ -37,28 +37,30 @@ export type RecordSchema = {
 	}
 }
 
-export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema) {
-	function getPkPrefix(type: string): Tuple {
-		return [type]
-	}
+export type RecordListArgs = ListArgs<Tuple> & { prefix?: Tuple }
 
-	function getIndexPrefix(type: string, indexName: string): Tuple {
-		return [type, indexName]
+export type RecordDb = {
+	get: (type: string, pkValues: Tuple) => any
+	set: (record: any) => void
+	delete: (type: string, pkValues: Tuple) => void
+	getAggregation: (aggName: string, groupValues: Tuple) => number
+	subspace: (prefix: Tuple) => {
+		subspace: (next: Tuple) => any
+		list: (args?: RecordListArgs) => any[]
 	}
+}
 
+export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema): RecordDb {
 	function extractKey(obj: any, fields: string[]): Tuple {
 		return fields.map((f) => obj[f])
 	}
 
 	function get(type: string, pkValues: Tuple): any {
-		const prefix = getPkPrefix(type)
-		const key = [...prefix, ...pkValues]
-		return db.get(key)
+		return db.get([type, ...pkValues])
 	}
 
 	function getAggregation(aggName: string, groupValues: Tuple): number {
-		const key = ["aggregation", aggName, ...groupValues]
-		const val = db.get(key)
+		const val = db.get(["aggregation", aggName, ...groupValues])
 		if (typeof val === "number") return val
 		return 0
 	}
@@ -69,7 +71,7 @@ export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema) {
 		if (!typeSchema) throw new Error(`Unknown type: ${type}`)
 
 		const pkValues = extractKey(record, typeSchema.primary)
-		const pk = [...getPkPrefix(type), ...pkValues]
+		const pk = [type, ...pkValues]
 
 		const oldRecord = db.get(pk)
 
@@ -79,17 +81,13 @@ export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema) {
 		// 2. Handle Indexes
 		if (typeSchema.indexes) {
 			for (const [indexName, fields] of Object.entries(typeSchema.indexes)) {
-				const indexPrefix = getIndexPrefix(type, indexName)
-
 				if (oldRecord) {
 					const oldIndexKeyValues = extractKey(oldRecord, fields)
-					const oldIndexKey = [...indexPrefix, ...oldIndexKeyValues]
-					db.delete(oldIndexKey)
+					db.delete([type, indexName, ...oldIndexKeyValues])
 				}
 
 				const newIndexKeyValues = extractKey(record, fields)
-				const newIndexKey = [...indexPrefix, ...newIndexKeyValues]
-				db.set(newIndexKey, null)
+				db.set([type, indexName, ...newIndexKeyValues], null)
 			}
 		}
 
@@ -113,7 +111,7 @@ export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema) {
 		const typeSchema = schema.types[type]
 		if (!typeSchema) throw new Error(`Unknown type: ${type}`)
 
-		const pk = [...getPkPrefix(type), ...pkValues]
+		const pk = [type, ...pkValues]
 		const oldRecord = db.get(pk)
 
 		if (!oldRecord) return
@@ -124,10 +122,8 @@ export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema) {
 		// Delete indexes
 		if (typeSchema.indexes) {
 			for (const [indexName, fields] of Object.entries(typeSchema.indexes)) {
-				const indexPrefix = getIndexPrefix(type, indexName)
 				const oldIndexKeyValues = extractKey(oldRecord, fields)
-				const oldIndexKey = [...indexPrefix, ...oldIndexKeyValues]
-				db.delete(oldIndexKey)
+				db.delete([type, indexName, ...oldIndexKeyValues])
 			}
 		}
 
@@ -174,9 +170,6 @@ export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema) {
 	}
 
 	function updateJoin(joinName: string, joinDef: JoinSchema, oldRecord: any, newRecord: any) {
-		// Logic: if oldRecord existed, we need to decrement matches.
-		// If newRecord exists, we need to increment matches.
-
 		const sides: ("left" | "right")[] = ["left", "right"]
 		for (const side of sides) {
 			const mySideDef = joinDef[side]
@@ -206,24 +199,12 @@ export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema) {
 	}
 
 	function findMatches(sideDef: JoinSide, matchVal: any): any[] {
-		// If index is specified, use scan logic.
 		if (sideDef.index) {
-			// Reuse the scan logic.
-			// The old logic was: this.scan(sideDef.type, sideDef.index, { prefix: [matchVal] })
-			// We can use subspace(...).list(...) or a helper.
-			// Let's use a helper `scanIndex` that `list` also uses.
 			return scanIndex(sideDef.type, sideDef.index, { prefix: [matchVal] })
 		}
-
-		// If no index, assume Primary Key scan?
-		// We can try scanning the primary store.
-		// "The `on` field implies single value."
-		// "If PK is `[col1, col2]`. And we scan `col1=matchVal`."
-
+		
 		const prefix = [sideDef.type, matchVal]
 		const items = db.subspace(prefix).list()
-		// Map back to records.
-		// Since we scanned primary store, items values are the records!
 		return items.map((item) => item.value)
 	}
 
@@ -250,73 +231,56 @@ export function recordDb(db: TupleDb | TupleTx, schema: RecordSchema) {
 	function scanIndex(
 		type: string,
 		indexName: string,
-		args: { prefix?: Tuple; limit?: number; reverse?: boolean } = {}
+		args: RecordListArgs = {}
 	): any[] {
 		const typeSchema = schema.types[type]
 		if (!typeSchema) throw new Error(`Unknown type: ${type}`)
-		if (!typeSchema.indexes || !typeSchema.indexes[indexName])
-			throw new Error(`Unknown index: ${indexName}`)
+		
+		const indexDef = typeSchema.indexes?.[indexName]
+		if (!indexDef) throw new Error(`Unknown index: ${indexName}`)
 
-		const indexDef = typeSchema.indexes[indexName]
-		const indexPrefix = getIndexPrefix(type, indexName)
+		// Map PK fields to their position in the index definition
+		const pkMapping = typeSchema.primary.map(pkField => {
+			const idx = indexDef.indexOf(pkField)
+			if (idx === -1) throw new Error(`Index ${indexName} missing PK field ${pkField}`)
+			return idx
+		})
+		
+		const basePrefix = [type, indexName]
+		const searchPrefix = args.prefix ? [...basePrefix, ...args.prefix] : basePrefix
 
-		const searchPrefix = args.prefix ? [...indexPrefix, ...args.prefix] : indexPrefix
+		// Filter out prefix from args before passing to db.list
+		const { prefix, ...listArgs } = args
+		const items = db.subspace(searchPrefix).list(listArgs)
 
-		const sub = db.subspace(searchPrefix)
-		const items = sub.list({ limit: args.limit, reverse: args.reverse })
-
-		const pkFields = typeSchema.primary
-		const indexFieldPositions = new Map<string, number>()
-		indexDef.forEach((f, i) => indexFieldPositions.set(f, i))
-
-		const resultRecords: any[] = []
-
-		for (const { key } of items) {
+		return items.map(({ key }) => {
 			const fullIndexValues = [...(args.prefix || []), ...key]
-
-			const pkValues: any[] = []
-			let foundAll = true
-			for (const pkField of pkFields) {
-				const idx = indexFieldPositions.get(pkField)
-				if (idx === undefined) {
-					foundAll = false
-					break
-				}
-				pkValues.push(fullIndexValues[idx])
-			}
-
-			if (foundAll) {
-				const record = get(type, pkValues)
-				if (record) resultRecords.push(record)
-			}
-		}
-
-		return resultRecords
+			const pkValues = pkMapping.map(idx => fullIndexValues[idx])
+			return get(type, pkValues)
+		}).filter(x => x !== undefined)
 	}
 
 	function subspace(prefix: Tuple) {
 		return {
 			subspace: (next: Tuple) => subspace([...prefix, ...next]),
-			list: (args: ListArgs<Tuple> = {}) => {
-				// Check if this prefix corresponds to an index scan.
-				// We expect [type, indexName, ...]
+			list: (args: RecordListArgs = {}) => {
+				// Check for index scan pattern [type, indexName, ...]
 				if (prefix.length >= 2) {
 					const [type, indexName] = prefix
 					if (typeof type === "string" && typeof indexName === "string") {
 						const typeSchema = schema.types[type]
 						if (typeSchema && typeSchema.indexes && typeSchema.indexes[indexName]) {
-							// It's an index scan!
-							// The "args.prefix" passed to list needs to be appended to any extra parts of "prefix" beyond [type, indexName]
 							const extraPrefix = prefix.slice(2)
 							const listPrefix = args.prefix ? [...extraPrefix, ...args.prefix] : extraPrefix
-
 							return scanIndex(type, indexName, { ...args, prefix: listPrefix })
 						}
 					}
 				}
-
-				// Otherwise, just a normal list on the underlying db subspace
-				return db.subspace(prefix).list(args)
+				
+				// Normal subspace list
+				const { prefix: listPrefix, ...listArgs } = args
+				const finalSub = listPrefix ? db.subspace([...prefix, ...listPrefix]) : db.subspace(prefix)
+				return finalSub.list(listArgs)
 			},
 		}
 	}

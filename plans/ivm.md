@@ -67,3 +67,15 @@ const rdb = recordDb(tdb, schema)
 ```
 
 Lets use similar verbs as we have for tupledb. Use set instead of put. And list instead of scan. And list args should be quite similar to tupleDb. The current scan args are just popping those first two args into the prefix. So really, its just subspace([type, index]).list(...).
+
+---
+
+
+Run typecheck. There are some errors. Also, this feels a bit too verbose sometimes. Functions like getPkPrefix and getIndexPrefix are just superfluous. extractKey seems ok though.
+
+The scanIndex function still seems a bit overcommplicated. Its just db.subspace([type, index]).list({}) and then a function that takes the first and last value in that key to fetch the primary record.
+
+Lets cleanup the code a little bit more. I like things to be clean and concise. A small amount of repetition can make things more legible sometimes especially if it makes the code substantially shorter.
+
+Another thing thats missing is a `type RecordDb = {}`. Lets make sure to define that interface and be thoughtful about it.
+
