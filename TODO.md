@@ -13,7 +13,9 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
+Regarding @src/tupledb/RecordLayer.ts, lets refactor things to make thing more concise and therefore easier to read.
 
+Certain things like the JoinSchema seem like they are much more verbose than they need to be and without any loss in generality we can specify it more like this:
 
 const joinDef: JoinSchema = {
 	left: {follow: "toId"}
@@ -25,9 +27,16 @@ const joinDef: JoinSchema = {
 }
 
 
+---
 
-timeline feed: posts by follows.
-identity feed: posts by followers.
+Refactor things to be cleaner and more concise. processQuery is a big function that feels like it could be broken up.
+
+
+Can you think of some examples of a three-way join? I'm imagining a discovery feed where you see posts not by people you follow but only my people who you follow follow. There might be a tricky piece here where we're excluding from the results. Not sure how to implement this.
+
+
+---
+
 discovery feed: posts by follows of follows.
 
 

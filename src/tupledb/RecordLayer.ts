@@ -513,13 +513,8 @@ function backfillIndex(db: TupleDb, schema: RecordDbSchema, type: string, indexN
 	const indexFields = recordSchema.indexes?.[indexName]
 	if (!indexFields) return
 
-	// Iterate primary records of this type
-	const prefix = [type]
-	const records = db
-		.subspace(prefix)
-		.list()
-		.filter((item) => item.value !== null)
-		.map((item) => item.value)
+	// Use scanSmart to potentially use an existing index to scan the table
+	const records = scanSmart(db, schema, type, {})
 
 	for (const record of records) {
 		const keys = extractKey(record, indexFields)
@@ -765,14 +760,17 @@ function processQuery(
 			limit: q.limit,
 			reverse: q.reverse,
 		})
-		return { schema: updatedSchema, result: results }
+		return { schema: updatedSchema, result: results.filter((r) => checkMatch(r, q.where)) }
 	}
 
-	const results = scanSmart(db, updatedSchema, targetName, {
-		where: q.where,
-		limit: q.limit,
-		reverse: q.reverse,
-	})
+	// Fallback to Primary Key Scan (Full or Prefix)
+	// ensureIndex returned undefined, meaning we should use the Primary Key.
+	const prefixTuple = q.where ? unrollKey(q.where, recordSchema.primary) : []
+	const results = db
+		.subspace([targetName, ...prefixTuple])
+		.list({ limit: q.limit, reverse: q.reverse })
+		.map((i) => i.value)
+		.filter((r) => r !== null && checkMatch(r, q.where))
 
 	return { schema: updatedSchema, result: results }
 }

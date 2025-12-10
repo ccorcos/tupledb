@@ -274,4 +274,108 @@ describe("RecordLayer", () => {
 		assert.equal(resultsMatch.length, 1)
 		assert.deepEqual(resultsMatch[0], user)
 	})
+
+	it("should support timeline and identity feeds via joins", () => {
+		// Users
+		const me: User = { type: "user", id: "uMe", name: "Me", bio: "" }
+		const uA: User = { type: "user", id: "uA", name: "UA", bio: "" }
+		const uB: User = { type: "user", id: "uB", name: "UB", bio: "" }
+		layer.set(me)
+		layer.set(uA)
+		layer.set(uB)
+
+		// Follows
+		// Me follows UA
+		layer.set({ type: "follow", fromId: "uMe", toId: "uA", datetime: "t0" })
+		// UB follows Me
+		layer.set({ type: "follow", fromId: "uB", toId: "uMe", datetime: "t0" })
+
+		// Posts
+		const pA1: Post = {
+			type: "post",
+			id: "pA1",
+			authorId: "uA",
+			datetime: "2023-01-01",
+			body: "UA Post",
+		}
+		const pB1: Post = {
+			type: "post",
+			id: "pB1",
+			authorId: "uB",
+			datetime: "2023-01-02",
+			body: "UB Post",
+		}
+		// My post
+		const pMe1: Post = {
+			type: "post",
+			id: "pMe1",
+			authorId: "uMe",
+			datetime: "2023-01-03",
+			body: "My Post",
+		}
+
+		layer.set(pA1)
+		layer.set(pB1)
+		layer.set(pMe1)
+
+		// Timeline Feed: Posts by people I follow.
+		// I follow UA. I should see pA1.
+		const timelineJoin: JoinSchema = {
+			left: { type: "follow", on: "toId" },
+			right: { type: "post", on: "authorId" },
+			key: [
+				{ side: "left", field: "fromId" }, // Me (subscriber)
+				{ side: "right", field: "datetime" }, // Time
+				{ side: "right", field: "id" },
+			],
+		}
+
+		const timeline = layer.query({
+			from: timelineJoin,
+			where: { fromId: "uMe" },
+		})
+
+		assert.equal(timeline.length, 1)
+		assert.equal(timeline[0].id, "pA1")
+
+		const fetchedP1 = layer.get({ type: "post", id: timeline[0].id })
+		assert.equal(fetchedP1.body, "UA Post")
+
+		// Check ordering if we add another post
+		const pA2: Post = {
+			type: "post",
+			id: "pA2",
+			authorId: "uA",
+			datetime: "2023-01-04",
+			body: "UA Post 2",
+		}
+		layer.set(pA2)
+
+		const timeline2 = layer.query({
+			from: timelineJoin,
+			where: { fromId: "uMe" },
+		})
+		assert.equal(timeline2.length, 2)
+		// Order should be by datetime ascending
+		assert.equal(timeline2[0].id, "pA1")
+		assert.equal(timeline2[1].id, "pA2")
+
+		// Identity Feed: Posts by people who follow me.
+		const identityFeed = layer.query({
+			from: {
+				left: { type: "follow", on: "fromId" }, // Match follow.fromId
+				right: { type: "post", on: "authorId" }, // with post.authorId
+				key: [
+					{ side: "left", field: "toId" }, // Me (broadcaster)
+					{ side: "right", field: "datetime" },
+					{ side: "right", field: "id" },
+				],
+			},
+			where: { toId: "uMe" },
+		})
+
+		// UB follows Me. I should see pB1.
+		assert.equal(identityFeed.length, 1)
+		assert.equal(identityFeed[0].id, "pB1")
+	})
 })

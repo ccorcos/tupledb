@@ -39,9 +39,11 @@ New features should generally be implemented as wrappers around `Okv` rather tha
 * Pattern: `function MyFeatureOkv(db: Okv): Okv { ... }`
 
 ### 3. Testing
-* Framework: Using node:test (`npm test`).
-* Location: Co-located `*.test.ts` files.
-* Typecheck: Always verify no type errors after writing code (`npm run typecheck`).
+- we're using `node:test` and `node:assert` packages fopr testing.
+- to run a single file `npx tsx path/to/file.test.ts`
+- to run the entire test suite `npm test`
+- test files are co-located as `*.test.ts` files.
+- always check types to verify no type errors `npm run typecheck`.
 
 ### 4. Code Style
 * Formatting: Prettier (`npm run prettier`).
