@@ -1,6 +1,10 @@
 import { compactObj } from "shared/compactObj"
 import { ListArgs, Tuple, TupleDb } from "./types"
 
+// ============================================================================
+// Types
+// ============================================================================
+
 export type RecordSchema = {
 	primary: string[]
 	indexes?: { [name: string]: string[] }
@@ -49,34 +53,9 @@ export type RecordDb = {
 	join: (name: string, args: ScanArgs) => { [key: string]: any }[]
 }
 
-/** Throws error on failed extraction. */
-function extractKey(obj: any, fields: string[]): Tuple {
-	return fields.map((f) => {
-		if (obj[f] === undefined) throw new Error(`Missing key field: ${f}`)
-		return obj[f]
-	})
-}
-
-/** Similar to extractKey but can stop early. */
-function unrollKey(obj: any, fields: string[]): Tuple {
-	const result: Tuple = []
-	if (!obj) return result
-	for (const field of fields) {
-		if (field in obj) result.push(obj[field])
-		else break
-	}
-	return result
-}
-
-function increment(db: TupleDb, key: Tuple, delta: number) {
-	const current = (db.get(key) as number) || 0
-	const next = current + delta
-	if (next <= 0) {
-		db.delete(key)
-	} else {
-		db.set(key, next)
-	}
-}
+// ============================================================================
+// Index
+// ============================================================================
 
 function getRecord(
 	db: TupleDb,
@@ -108,37 +87,6 @@ function updateIndexes(
 			db.set([type, indexName, ...keys], null)
 		}
 	}
-}
-
-function updateAggregation(
-	db: TupleDb,
-	aggName: string,
-	aggDef: AggregationSchema,
-	oldRecord: any,
-	newRecord: any
-) {
-	if (oldRecord) {
-		const key = ["aggregation", aggName, ...extractKey(oldRecord, aggDef.groupBy)]
-		increment(db, key, -1)
-	}
-	if (newRecord) {
-		const key = ["aggregation", aggName, ...extractKey(newRecord, aggDef.groupBy)]
-		increment(db, key, 1)
-	}
-}
-
-function updateJoinKey(
-	db: TupleDb,
-	joinName: string,
-	joinDef: JoinSchema,
-	left: any,
-	right: any,
-	delta: number
-) {
-	const keyValues = joinDef.key.map(({ side, field }) =>
-		side === "left" ? left[field] : right[field]
-	)
-	increment(db, ["join", joinName, ...keyValues], delta)
 }
 
 function scanIndex(
@@ -183,6 +131,54 @@ function scanIndex(
 		})
 }
 
+// ============================================================================
+// Aggregation
+// ============================================================================
+
+function increment(db: TupleDb, key: Tuple, delta: number) {
+	const current = (db.get(key) as number) || 0
+	const next = current + delta
+	if (next <= 0) {
+		db.delete(key)
+	} else {
+		db.set(key, next)
+	}
+}
+
+function updateAggregation(
+	db: TupleDb,
+	aggName: string,
+	aggDef: AggregationSchema,
+	oldRecord: any,
+	newRecord: any
+) {
+	if (oldRecord) {
+		const key = ["aggregation", aggName, ...extractKey(oldRecord, aggDef.groupBy)]
+		increment(db, key, -1)
+	}
+	if (newRecord) {
+		const key = ["aggregation", aggName, ...extractKey(newRecord, aggDef.groupBy)]
+		increment(db, key, 1)
+	}
+}
+
+function getAggregation(
+	db: TupleDb,
+	schema: RecordDbSchema,
+	aggName: string,
+	args: { [key: string]: any }
+): number {
+	const aggDef = schema.aggregations?.[aggName]
+	if (!aggDef) throw new Error(`Unknown aggregation: ${aggName}`)
+	const groupValues = extractKey(args, aggDef.groupBy)
+	const val = db.get(["aggregation", aggName, ...groupValues])
+	return typeof val === "number" ? val : 0
+}
+
+// ============================================================================
+// Join
+// ============================================================================
+
 function findMatches(db: TupleDb, schema: RecordDbSchema, sideDef: JoinSide, matchVal: any): any[] {
 	if (sideDef.index) {
 		return scanIndex(db, schema, sideDef.type, sideDef.index, {
@@ -194,6 +190,20 @@ function findMatches(db: TupleDb, schema: RecordDbSchema, sideDef: JoinSide, mat
 		.subspace([sideDef.type, matchVal])
 		.list()
 		.map((i) => i.value)
+}
+
+function updateJoinKey(
+	db: TupleDb,
+	joinName: string,
+	joinDef: JoinSchema,
+	left: any,
+	right: any,
+	delta: number
+) {
+	const keyValues = joinDef.key.map(({ side, field }) =>
+		side === "left" ? left[field] : right[field]
+	)
+	increment(db, ["join", joinName, ...keyValues], delta)
 }
 
 function updateJoin(
@@ -228,6 +238,44 @@ function updateJoin(
 		}
 	}
 }
+
+function scanJoin(
+	db: TupleDb,
+	schema: RecordDbSchema,
+	name: string,
+	args: ScanArgs
+): { [key: string]: any }[] {
+	const joinDef = schema.joins?.[name]
+	if (!joinDef) throw new Error(`Unknown join: ${name}`)
+
+	const keyFields = joinDef.key.map((k) => k.field)
+	const prefixTuple = args.eq ? unrollKey(args.eq, keyFields) : []
+	const remainingFields = keyFields.slice(prefixTuple.length)
+
+	const listArgs: ListArgs<Tuple> = compactObj({
+		limit: args.limit,
+		reverse: args.reverse,
+		gt: args.gt ? unrollKey(args.gt, remainingFields) : undefined,
+		gte: args.gte ? unrollKey(args.gte, remainingFields) : undefined,
+		lt: args.lt ? unrollKey(args.lt, remainingFields) : undefined,
+		lte: args.lte ? unrollKey(args.lte, remainingFields) : undefined,
+	})
+
+	return db
+		.subspace(["join", name, ...prefixTuple])
+		.list(listArgs)
+		.filter((item) => (item.value as number) > 0)
+		.map(({ key }) => {
+			const fullKey = [...prefixTuple, ...key]
+			const obj: any = {}
+			for (const [i, f] of keyFields.entries()) obj[f] = fullKey[i]
+			return obj
+		})
+}
+
+// ============================================================================
+// Write
+// ============================================================================
 
 function triggerUpdates(
 	db: TupleDb,
@@ -287,52 +335,9 @@ function deleteRecord(
 	triggerUpdates(db, schema, type, oldRecord, null)
 }
 
-function getAggregation(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	aggName: string,
-	args: { [key: string]: any }
-): number {
-	const aggDef = schema.aggregations?.[aggName]
-	if (!aggDef) throw new Error(`Unknown aggregation: ${aggName}`)
-	const groupValues = extractKey(args, aggDef.groupBy)
-	const val = db.get(["aggregation", aggName, ...groupValues])
-	return typeof val === "number" ? val : 0
-}
-
-function scanJoin(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	name: string,
-	args: ScanArgs
-): { [key: string]: any }[] {
-	const joinDef = schema.joins?.[name]
-	if (!joinDef) throw new Error(`Unknown join: ${name}`)
-
-	const keyFields = joinDef.key.map((k) => k.field)
-	const prefixTuple = args.eq ? unrollKey(args.eq, keyFields) : []
-	const remainingFields = keyFields.slice(prefixTuple.length)
-
-	const listArgs: ListArgs<Tuple> = compactObj({
-		limit: args.limit,
-		reverse: args.reverse,
-		gt: args.gt ? unrollKey(args.gt, remainingFields) : undefined,
-		gte: args.gte ? unrollKey(args.gte, remainingFields) : undefined,
-		lt: args.lt ? unrollKey(args.lt, remainingFields) : undefined,
-		lte: args.lte ? unrollKey(args.lte, remainingFields) : undefined,
-	})
-
-	return db
-		.subspace(["join", name, ...prefixTuple])
-		.list(listArgs)
-		.filter((item) => (item.value as number) > 0)
-		.map(({ key }) => {
-			const fullKey = [...prefixTuple, ...key]
-			const obj: any = {}
-			for (const [i, f] of keyFields.entries()) obj[f] = fullKey[i]
-			return obj
-		})
-}
+// ============================================================================
+// RecordDb
+// ============================================================================
 
 export function recordDb(db: TupleDb, schema: RecordDbSchema): RecordDb {
 	return {
@@ -343,4 +348,27 @@ export function recordDb(db: TupleDb, schema: RecordDbSchema): RecordDb {
 		index: (type, name, args) => scanIndex(db, schema, type, name, args),
 		join: (name, args) => scanJoin(db, schema, name, args),
 	}
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/** Throws error on failed extraction. */
+function extractKey(obj: any, fields: string[]): Tuple {
+	return fields.map((f) => {
+		if (obj[f] === undefined) throw new Error(`Missing key field: ${f}`)
+		return obj[f]
+	})
+}
+
+/** Similar to extractKey but can stop early. */
+function unrollKey(obj: any, fields: string[]): Tuple {
+	const result: Tuple = []
+	if (!obj) return result
+	for (const field of fields) {
+		if (field in obj) result.push(obj[field])
+		else break
+	}
+	return result
 }
