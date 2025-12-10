@@ -45,7 +45,7 @@ export type ScanQuery = {
 
 export type QueryQuery = {
 	// Target (Can be record type or join name)
-	from: string
+	from: string | JoinSchema
 
 	// Filter/Sort (Index)
 	where?: Record<string, any>
@@ -551,9 +551,77 @@ function backfillAggregation(db: TupleDb, schema: RecordDbSchema, aggName: strin
 	}
 }
 
+function backfillJoin(db: TupleDb, schema: RecordDbSchema, joinName: string) {
+	const joinDef = schema.joins?.[joinName]
+	if (!joinDef) return
+
+	// Only iterate Left side to avoid double counting matches
+	const type = joinDef.left.type
+	const records = db
+		.subspace([type])
+		.list()
+		.filter((item) => item.value !== null)
+		.map((item) => item.value)
+
+	for (const record of records) {
+		// Act as LEFT side
+		const mySideDef = joinDef.left
+		const otherSideDef = joinDef.right
+
+		const matches = findMatches(db, schema, otherSideDef, record[mySideDef.on])
+		for (const match of matches) {
+			const left = record
+			const right = match
+			const keyValues = joinDef.key.map(({ side: s, field }) =>
+				(s === "left" ? left[field] : right[field])
+			)
+			increment(db, ["join", joinName, ...keyValues], 1)
+		}
+	}
+}
+
 // ============================================================================
 // Unified Query Processor
 // ============================================================================
+
+function ensureIndex(
+	db: TupleDb,
+	schema: RecordDbSchema,
+	type: string,
+	requiredPrefix: string[]
+): { schema: RecordDbSchema; indexName: string | undefined; schemaChanged: boolean } {
+	const recordSchema = schema.records[type]
+	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
+
+	const neededFields = [...requiredPrefix, ...recordSchema.primary]
+	const uniqueFields = [...new Set(neededFields)]
+
+	if (deepEqual(uniqueFields, recordSchema.primary)) {
+		return { schema, indexName: undefined, schemaChanged: false }
+	}
+
+	// Check existing
+	if (recordSchema.indexes) {
+		for (const [name, fields] of Object.entries(recordSchema.indexes)) {
+			if (fields.length >= uniqueFields.length) {
+				const prefix = fields.slice(0, uniqueFields.length)
+				if (deepEqual(prefix, uniqueFields)) {
+					return { schema, indexName: name, schemaChanged: false }
+				}
+			}
+		}
+	}
+
+	// Create
+	const indexName = `auto_idx_${uniqueFields.join("_")}`
+	const newSchema = JSON.parse(JSON.stringify(schema))
+	newSchema.records[type].indexes = newSchema.records[type].indexes || {}
+	newSchema.records[type].indexes[indexName] = uniqueFields
+
+	backfillIndex(db, newSchema, type, indexName)
+
+	return { schema: newSchema, indexName, schemaChanged: true }
+}
 
 function processQuery(
 	db: TupleDb,
@@ -562,20 +630,52 @@ function processQuery(
 ): { schema: RecordDbSchema; result: any } {
 	let updatedSchema = schema
 	let schemaChanged = false
+	let targetFrom = q.from
+
+	// Handle Ad-Hoc Join
+	if (typeof targetFrom === "object") {
+		const joinDef = targetFrom as JoinSchema
+
+		// Ensure indexes for both sides
+		const leftRes = ensureIndex(db, updatedSchema, joinDef.left.type, [joinDef.left.on])
+		updatedSchema = leftRes.schema
+		schemaChanged = schemaChanged || leftRes.schemaChanged
+		joinDef.left.index = leftRes.indexName
+
+		const rightRes = ensureIndex(db, updatedSchema, joinDef.right.type, [joinDef.right.on])
+		updatedSchema = rightRes.schema
+		schemaChanged = schemaChanged || rightRes.schemaChanged
+		joinDef.right.index = rightRes.indexName
+
+		// Generate Join Name
+		const joinName = `auto_join_${joinDef.left.type}_${joinDef.left.on}_${joinDef.right.type}_${joinDef.right.on}`
+
+		if (!updatedSchema.joins?.[joinName]) {
+			updatedSchema = JSON.parse(JSON.stringify(updatedSchema))
+			updatedSchema.joins = updatedSchema.joins || {}
+			updatedSchema.joins[joinName] = joinDef
+			schemaChanged = true
+			backfillJoin(db, updatedSchema, joinName)
+		}
+		targetFrom = joinName
+	}
+
+	const targetName = targetFrom as string
 
 	// Handle JOIN Query
-	if (schema.joins?.[q.from]) {
+	if (updatedSchema.joins?.[targetName]) {
 		// Map QueryQuery to ScanArgs
 		const args: ScanArgs = {
 			eq: q.where,
 			limit: q.limit,
 			reverse: q.reverse,
 		}
-		return { schema: updatedSchema, result: scanJoin(db, schema, q.from, args) }
+		if (schemaChanged) saveSchema(db, updatedSchema)
+		return { schema: updatedSchema, result: scanJoin(db, updatedSchema, targetName, args) }
 	}
 
-	const recordSchema = schema.records[q.from]
-	if (!recordSchema) throw new Error(`Unknown type: ${q.from}`)
+	const recordSchema = updatedSchema.records[targetName]
+	if (!recordSchema) throw new Error(`Unknown type: ${targetName}`)
 
 	let bestIndexName: string | undefined
 
@@ -583,48 +683,12 @@ function processQuery(
 	if (q.where || q.sort) {
 		const whereKeys = q.where ? Object.keys(q.where).sort() : []
 		const sortKeys = q.sort || []
+		const requiredPrefix = [...whereKeys, ...sortKeys]
 
-		// Construct a canonical index name
-		// Append primary key fields to ensure uniqueness and allow fetching
-		const neededFields = [...whereKeys, ...sortKeys, ...recordSchema.primary]
-		// Filter out duplicates if any (e.g. sorted by where clause field)
-		const uniqueFields = [...new Set(neededFields)]
-
-		if (deepEqual(uniqueFields, recordSchema.primary)) {
-			// Satisfied by primary key
-			bestIndexName = undefined
-		} else {
-			// Try to find existing index
-			if (recordSchema.indexes) {
-				for (const [name, fields] of Object.entries(recordSchema.indexes)) {
-					// Check if fields start with uniqueFields
-					if (fields.length >= uniqueFields.length) {
-						const prefix = fields.slice(0, uniqueFields.length)
-						if (deepEqual(prefix, uniqueFields)) {
-							bestIndexName = name
-							break
-						}
-					}
-				}
-			}
-
-			if (!bestIndexName && uniqueFields.length > 0) {
-				// Create Index!
-				const indexName = `auto_idx_${uniqueFields.join("_")}`
-
-				// Mutate schema copy
-				updatedSchema = JSON.parse(JSON.stringify(schema))
-				updatedSchema.records[q.from].indexes = updatedSchema.records[q.from].indexes || {}
-				updatedSchema.records[q.from].indexes![indexName] = uniqueFields
-
-				schemaChanged = true
-				bestIndexName = indexName
-
-				// Backfill happens after we commit schema change? No, "single transaction".
-				// We must backfill NOW.
-				backfillIndex(db, updatedSchema, q.from, indexName)
-			}
-		}
+		const res = ensureIndex(db, updatedSchema, targetName, requiredPrefix)
+		updatedSchema = res.schema
+		schemaChanged = schemaChanged || res.schemaChanged
+		bestIndexName = res.indexName
 	}
 
 	// 2. Ensure Aggregation
@@ -637,7 +701,7 @@ function processQuery(
 			if (updatedSchema.aggregations) {
 				for (const [name, def] of Object.entries(updatedSchema.aggregations)) {
 					if (
-						def.source === q.from &&
+						def.source === targetName &&
 						def.kind === kind &&
 						deepEqual(def.groupBy.sort(), groupBy)
 					) {
@@ -650,7 +714,7 @@ function processQuery(
 
 			// If not found, create new one
 			if (!aggName) {
-				aggName = `auto_agg_${q.from}_${kind}_${groupBy.join("_")}`
+				aggName = `auto_agg_${targetName}_${kind}_${groupBy.join("_")}`
 
 				if (!updatedSchema.aggregations?.[aggName]) {
 					if (!updatedSchema.aggregations) updatedSchema.aggregations = {}
@@ -659,7 +723,7 @@ function processQuery(
 					// For now, if kind != count, we lack 'field'.
 
 					updatedSchema.aggregations[aggName] = {
-						source: q.from,
+						source: targetName,
 						groupBy: groupBy,
 						kind: kind,
 						field: undefined, // TODO: Update QueryQuery to support field selection for sum/min/max
@@ -686,7 +750,7 @@ function processQuery(
 			if (updatedSchema.aggregations) {
 				for (const [name, def] of Object.entries(updatedSchema.aggregations)) {
 					if (
-						def.source === q.from &&
+						def.source === targetName &&
 						def.kind === kind &&
 						deepEqual(def.groupBy.sort(), groupBy)
 					) {
@@ -703,7 +767,7 @@ function processQuery(
 	}
 
 	if (bestIndexName) {
-		const results = scanIndex(db, updatedSchema, q.from, bestIndexName, {
+		const results = scanIndex(db, updatedSchema, targetName, bestIndexName, {
 			eq: q.where,
 			limit: q.limit,
 			reverse: q.reverse,
@@ -711,7 +775,7 @@ function processQuery(
 		return { schema: updatedSchema, result: results }
 	}
 
-	const results = scanSmart(db, updatedSchema, q.from, {
+	const results = scanSmart(db, updatedSchema, targetName, {
 		where: q.where,
 		limit: q.limit,
 		reverse: q.reverse,

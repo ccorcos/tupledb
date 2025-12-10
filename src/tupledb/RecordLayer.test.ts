@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { recordDb, RecordDbSchema } from "./RecordLayer"
+import { JoinSchema, recordDb, RecordDbSchema } from "./RecordLayer"
 import { tupleDb } from "./TupleDb"
 
 // Define the types
@@ -12,49 +12,15 @@ const schema: RecordDbSchema = {
 	records: {
 		user: {
 			primary: ["id"],
-			indexes: {
-				byName: ["name", "id"],
-			},
 		},
 		post: {
 			primary: ["id"],
-			indexes: {
-				byAuthor: ["authorId", "datetime", "id"],
-			},
 		},
 		follow: {
 			primary: ["fromId", "toId"],
-			indexes: {
-				byTo: ["toId", "fromId"],
-			},
 		},
 		notification: {
 			primary: ["userId", "postId"],
-			indexes: {
-				feed: ["userId", "postDatetime", "postId"],
-			},
-		},
-	},
-	aggregations: {
-		userPostCount: {
-			source: "post",
-			groupBy: ["authorId"],
-			kind: "count",
-		},
-		userFollowerCount: {
-			source: "follow",
-			groupBy: ["toId"],
-			kind: "count",
-		},
-	},
-	joins: {
-		followersOfFollowers: {
-			left: { type: "follow", on: "toId", index: "byTo" },
-			right: { type: "follow", on: "fromId" }, // default primary
-			key: [
-				{ side: "right", field: "toId" }, // User
-				{ side: "left", field: "fromId" }, // FoF
-			],
 		},
 	},
 }
@@ -75,8 +41,12 @@ describe("RecordLayer", () => {
 		const user: User = { type: "user", id: "u1", name: "Chet", bio: "Engineer" }
 		layer.set(user)
 
+		// Trigger index creation
+		layer.query({ from: "user", where: { name: "Chet" } })
+
 		// Check index via tupleDb directly
-		const indexKey = ["user", "byName", "Chet", "u1"]
+		// Index name: auto_idx_name_id
+		const indexKey = ["user", "auto_idx_name_id", "Chet", "u1"]
 		assert.equal(db.get(indexKey), null)
 
 		// Update user
@@ -87,7 +57,7 @@ describe("RecordLayer", () => {
 		assert.equal(db.get(indexKey), undefined)
 
 		// New index should exist
-		const newIndexKey = ["user", "byName", "Chester", "u1"]
+		const newIndexKey = ["user", "auto_idx_name_id", "Chester", "u1"]
 		assert.equal(db.get(newIndexKey), null)
 	})
 
@@ -100,7 +70,7 @@ describe("RecordLayer", () => {
 		layer.set(user2)
 		layer.set(user3)
 
-		// Scan index using query
+		// Scan index using query (triggers index creation)
 		const results = layer.query({
 			from: "user",
 			where: { name: "Alice" },
@@ -108,6 +78,10 @@ describe("RecordLayer", () => {
 		assert.equal(results.length, 2)
 		assert.deepEqual(results[0], user1)
 		assert.deepEqual(results[1], user3)
+
+		// Assert index generation
+		const s = db.get(["_schema", "current"]) as RecordDbSchema
+		assert.ok(s.records.user.indexes?.["auto_idx_name_id"])
 	})
 
 	it("should maintain a count of posts per user", () => {
@@ -134,68 +108,92 @@ describe("RecordLayer", () => {
 		}
 
 		// Initial check using query with explicit aggregation
-		assert.equal(layer.query({
-			from: "post",
-			groupBy: ["authorId"],
-			aggregate: { count: "count" },
-			where: { authorId: "u1" }
-		}).count, 0)
+		assert.equal(
+			layer.query({
+				from: "post",
+				groupBy: ["authorId"],
+				aggregate: { count: "count" },
+				where: { authorId: "u1" },
+			}).count,
+			0
+		)
 
 		layer.set(post1)
-		assert.equal(layer.query({
-			from: "post",
-			groupBy: ["authorId"],
-			aggregate: { count: "count" },
-			where: { authorId: "u1" }
-		}).count, 1)
+		assert.equal(
+			layer.query({
+				from: "post",
+				groupBy: ["authorId"],
+				aggregate: { count: "count" },
+				where: { authorId: "u1" },
+			}).count,
+			1
+		)
 
 		layer.set(post2)
-		assert.equal(layer.query({
-			from: "post",
-			groupBy: ["authorId"],
-			aggregate: { count: "count" },
-			where: { authorId: "u1" }
-		}).count, 2)
-		
-		assert.equal(layer.query({
-			from: "post",
-			groupBy: ["authorId"],
-			aggregate: { count: "count" },
-			where: { authorId: "u2" }
-		}).count, 0)
+		assert.equal(
+			layer.query({
+				from: "post",
+				groupBy: ["authorId"],
+				aggregate: { count: "count" },
+				where: { authorId: "u1" },
+			}).count,
+			2
+		)
+
+		assert.equal(
+			layer.query({
+				from: "post",
+				groupBy: ["authorId"],
+				aggregate: { count: "count" },
+				where: { authorId: "u2" },
+			}).count,
+			0
+		)
 
 		layer.set(post3)
-		assert.equal(layer.query({
-			from: "post",
-			groupBy: ["authorId"],
-			aggregate: { count: "count" },
-			where: { authorId: "u2" }
-		}).count, 1)
+		assert.equal(
+			layer.query({
+				from: "post",
+				groupBy: ["authorId"],
+				aggregate: { count: "count" },
+				where: { authorId: "u2" },
+			}).count,
+			1
+		)
 
 		// Delete a post
 		layer.delete({ type: "post", id: "p1" })
-		assert.equal(layer.query({
-			from: "post",
-			groupBy: ["authorId"],
-			aggregate: { count: "count" },
-			where: { authorId: "u1" }
-		}).count, 1)
+		assert.equal(
+			layer.query({
+				from: "post",
+				groupBy: ["authorId"],
+				aggregate: { count: "count" },
+				where: { authorId: "u1" },
+			}).count,
+			1
+		)
 
 		// Move a post
 		const post2Moved = { ...post2, authorId: "u2" }
 		layer.set(post2Moved)
-		assert.equal(layer.query({
-			from: "post",
-			groupBy: ["authorId"],
-			aggregate: { count: "count" },
-			where: { authorId: "u1" }
-		}).count, 0)
-		assert.equal(layer.query({
-			from: "post",
-			groupBy: ["authorId"],
-			aggregate: { count: "count" },
-			where: { authorId: "u2" }
-		}).count, 2)
+		assert.equal(
+			layer.query({
+				from: "post",
+				groupBy: ["authorId"],
+				aggregate: { count: "count" },
+				where: { authorId: "u1" },
+			}).count,
+			0
+		)
+		assert.equal(
+			layer.query({
+				from: "post",
+				groupBy: ["authorId"],
+				aggregate: { count: "count" },
+				where: { authorId: "u2" },
+			}).count,
+			2
+		)
 	})
 
 	it("should index followers of followers", () => {
@@ -206,10 +204,19 @@ describe("RecordLayer", () => {
 		layer.set(f1)
 		layer.set(f2)
 
+		const joinDef: JoinSchema = {
+			left: { type: "follow", on: "toId" },
+			right: { type: "follow", on: "fromId" },
+			key: [
+				{ side: "right", field: "toId" }, // User
+				{ side: "left", field: "fromId" }, // FoF
+			],
+		}
+
 		// Check C's FoFs using query on join
 		const cFofs = layer.query({
-			from: "followersOfFollowers",
-			where: { toId: "C" }
+			from: joinDef,
+			where: { toId: "C" },
 		})
 		assert.equal(cFofs.length, 1)
 		assert.equal(cFofs[0].fromId, "A")
@@ -217,24 +224,30 @@ describe("RecordLayer", () => {
 
 		layer.set(f3)
 		const dFofs = layer.query({
-			from: "followersOfFollowers",
-			where: { toId: "D" }
+			from: joinDef, // Reuse definition
+			where: { toId: "D" },
 		})
 		assert.equal(dFofs.length, 1)
 		assert.equal(dFofs[0].fromId, "B")
+
+		// Assert Schema generated
+		const s = db.get(["_schema", "current"]) as RecordDbSchema
+		const joinName = `auto_join_follow_toId_follow_fromId`
+		assert.ok(s.joins?.[joinName])
+		assert.ok(s.records.follow.indexes?.["auto_idx_toId_fromId"]) // Left Side Index
 
 		// Delete B -> C
 		layer.delete({ type: "follow", fromId: "B", toId: "C" })
 
 		const cFofsAfter = layer.query({
-			from: "followersOfFollowers",
-			where: { toId: "C" }
+			from: joinDef,
+			where: { toId: "C" },
 		})
 		assert.equal(cFofsAfter.length, 0)
 
 		const dFofsAfter = layer.query({
-			from: "followersOfFollowers",
-			where: { toId: "D" }
+			from: joinDef,
+			where: { toId: "D" },
 		})
 		assert.equal(dFofsAfter.length, 0)
 	})
