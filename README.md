@@ -22,7 +22,7 @@ When building an in-memory okv however, we don't need to serialize values so we 
 
 ## TupleOkv
 
-To get a tuple database, we need to do some encoding of tuples into lexicographically ordered strings and wrap the Okv api. That's exactly what the functions in `Codec.ts` help with. In practice, you can just do this:
+To get a tuple database, we need to do some encoding of tuples into lexicographically ordered strings and wrap the Okv api. That's exactly what the functions in `Codec.ts` and `Encoder.ts` help with. In practice, you can just do this:
 
 ```ts
 // For a persisted database
