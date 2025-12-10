@@ -7,13 +7,6 @@ import { tupleDb } from "./TupleDb"
 type User = { type: "user"; id: string; name: string; bio: string }
 type Post = { type: "post"; id: string; authorId: string; datetime: string; body: string }
 type Follow = { type: "follow"; fromId: string; toId: string; datetime: string }
-type Notification = {
-	type: "notification"
-	userId: string
-	postId: string
-	postDatetime: string
-	read: boolean
-}
 
 const schema: RecordDbSchema = {
 	records: {
@@ -82,7 +75,7 @@ describe("RecordLayer", () => {
 		const user: User = { type: "user", id: "u1", name: "Chet", bio: "Engineer" }
 		layer.set(user)
 
-		// Check index
+		// Check index via tupleDb directly
 		const indexKey = ["user", "byName", "Chet", "u1"]
 		assert.equal(db.get(indexKey), null)
 
@@ -98,7 +91,7 @@ describe("RecordLayer", () => {
 		assert.equal(db.get(newIndexKey), null)
 	})
 
-	it("should handle secondary lookups", () => {
+	it("should handle secondary lookups via query", () => {
 		const user1: User = { type: "user", id: "u1", name: "Alice", bio: "" }
 		const user2: User = { type: "user", id: "u2", name: "Bob", bio: "" }
 		const user3: User = { type: "user", id: "u3", name: "Alice", bio: "Another Alice" }
@@ -107,8 +100,11 @@ describe("RecordLayer", () => {
 		layer.set(user2)
 		layer.set(user3)
 
-		// Scan index
-		const results = layer.index("user", "byName", { eq: { name: "Alice" } })
+		// Scan index using query
+		const results = layer.query({
+			from: "user",
+			where: { name: "Alice" },
+		})
 		assert.equal(results.length, 2)
 		assert.deepEqual(results[0], user1)
 		assert.deepEqual(results[1], user3)
@@ -137,28 +133,69 @@ describe("RecordLayer", () => {
 			body: "Test",
 		}
 
-		assert.equal(layer.aggregation("userPostCount", { authorId: "u1" }), 0)
+		// Initial check using query with explicit aggregation
+		assert.equal(layer.query({
+			from: "post",
+			groupBy: ["authorId"],
+			aggregate: { count: "count" },
+			where: { authorId: "u1" }
+		}).count, 0)
 
 		layer.set(post1)
-		assert.equal(layer.aggregation("userPostCount", { authorId: "u1" }), 1)
+		assert.equal(layer.query({
+			from: "post",
+			groupBy: ["authorId"],
+			aggregate: { count: "count" },
+			where: { authorId: "u1" }
+		}).count, 1)
 
 		layer.set(post2)
-		assert.equal(layer.aggregation("userPostCount", { authorId: "u1" }), 2)
-		assert.equal(layer.aggregation("userPostCount", { authorId: "u2" }), 0)
+		assert.equal(layer.query({
+			from: "post",
+			groupBy: ["authorId"],
+			aggregate: { count: "count" },
+			where: { authorId: "u1" }
+		}).count, 2)
+		
+		assert.equal(layer.query({
+			from: "post",
+			groupBy: ["authorId"],
+			aggregate: { count: "count" },
+			where: { authorId: "u2" }
+		}).count, 0)
 
 		layer.set(post3)
-		assert.equal(layer.aggregation("userPostCount", { authorId: "u2" }), 1)
+		assert.equal(layer.query({
+			from: "post",
+			groupBy: ["authorId"],
+			aggregate: { count: "count" },
+			where: { authorId: "u2" }
+		}).count, 1)
 
 		// Delete a post
 		layer.delete({ type: "post", id: "p1" })
-		assert.equal(layer.aggregation("userPostCount", { authorId: "u1" }), 1)
+		assert.equal(layer.query({
+			from: "post",
+			groupBy: ["authorId"],
+			aggregate: { count: "count" },
+			where: { authorId: "u1" }
+		}).count, 1)
 
-		// Move a post to another author (unlikely for posts, but tests logic)
+		// Move a post
 		const post2Moved = { ...post2, authorId: "u2" }
 		layer.set(post2Moved)
-		// u1 should decr (1 -> 0), u2 should incr (1 -> 2)
-		assert.equal(layer.aggregation("userPostCount", { authorId: "u1" }), 0)
-		assert.equal(layer.aggregation("userPostCount", { authorId: "u2" }), 2)
+		assert.equal(layer.query({
+			from: "post",
+			groupBy: ["authorId"],
+			aggregate: { count: "count" },
+			where: { authorId: "u1" }
+		}).count, 0)
+		assert.equal(layer.query({
+			from: "post",
+			groupBy: ["authorId"],
+			aggregate: { count: "count" },
+			where: { authorId: "u2" }
+		}).count, 2)
 	})
 
 	it("should index followers of followers", () => {
@@ -166,36 +203,39 @@ describe("RecordLayer", () => {
 		const f2: Follow = { type: "follow", fromId: "B", toId: "C", datetime: "t2" }
 		const f3: Follow = { type: "follow", fromId: "C", toId: "D", datetime: "t3" }
 
-		// A -> B -> C -> D
-		// FoF for C should include A.
-		// FoF for D should include B.
-
 		layer.set(f1)
 		layer.set(f2)
 
-		// Check C's FoFs (Should be A)
-		// Join key: [toId, fromId] -> eq: { toId: "C" }
-		const cFofs = layer.join("followersOfFollowers", { eq: { toId: "C" } })
+		// Check C's FoFs using query on join
+		const cFofs = layer.query({
+			from: "followersOfFollowers",
+			where: { toId: "C" }
+		})
 		assert.equal(cFofs.length, 1)
 		assert.equal(cFofs[0].fromId, "A")
 		assert.equal(cFofs[0].toId, "C")
 
 		layer.set(f3)
-		const dFofs = layer.join("followersOfFollowers", { eq: { toId: "D" } })
+		const dFofs = layer.query({
+			from: "followersOfFollowers",
+			where: { toId: "D" }
+		})
 		assert.equal(dFofs.length, 1)
 		assert.equal(dFofs[0].fromId, "B")
 
 		// Delete B -> C
 		layer.delete({ type: "follow", fromId: "B", toId: "C" })
 
-		// C's FoFs should be empty (link broken)
-		const cFofsAfter = layer.join("followersOfFollowers", { eq: { toId: "C" } })
+		const cFofsAfter = layer.query({
+			from: "followersOfFollowers",
+			where: { toId: "C" }
+		})
 		assert.equal(cFofsAfter.length, 0)
 
-		// D's FoF was B (via C). C->D exists. B->C deleted.
-		// B->C was "Left" for the join (Left(B->C), Right(C->D) -> Join(D, B)).
-		// So D's FoF (B) should be removed.
-		const dFofsAfter = layer.join("followersOfFollowers", { eq: { toId: "D" } })
+		const dFofsAfter = layer.query({
+			from: "followersOfFollowers",
+			where: { toId: "D" }
+		})
 		assert.equal(dFofsAfter.length, 0)
 	})
 })

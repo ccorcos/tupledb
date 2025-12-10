@@ -14,17 +14,27 @@ Create branches to experiment with new layers and implementations...
 ---
 
 
+In RecordLayer.test.ts we're still specifying indexes. Lets get rid of all those indexes and allow them to be generated. Lets make sure to assert not only that the query response is correct,  but that the index itself was generated.
+
+We also need some way of specifying join queries so that those indexes can be automatically generated along with any necessary intermediate indexes. We should delete followersOfFollowers join in the schema definition and also assert that it gets generated upon querying.
+
+
+---
+
+What's next... how do we do all this on the client? Maybe lets ask how zero does it.
+
+
+
+
+
+
+
 what about aggregations across multiple tables... is there a use-case for that?
 Define an arbitrary reducer for more aggregation options.
 More aggregation types... sum, average, unique.
 
 
-
-
 Join side with the optional index... lets dig into that. Why is that there? We should generate recursive indexes here, no?
-
-
-
 
 
 Taking it a step further, maybe want a feed of posts from followers of followers and we want to add and remove from this list as follows are created or deleted. But we only care about recent posts (datetime in the last 24 hours). Maybe we have a background job to cleanup or something, but the point is that we don't need to backfill everything.

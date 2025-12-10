@@ -13,7 +13,8 @@ export type RecordSchema = {
 export type AggregationSchema = {
 	source: string
 	groupBy: string[]
-	kind: "count"
+	kind: "count" | "sum" | "min" | "max"
+	field?: string // Required for sum, min, max
 }
 
 export type JoinSide = {
@@ -36,25 +37,138 @@ export type RecordDbSchema = {
 
 export type ScanArgs = ListArgs<{ [key: string]: any }> & { eq?: { [key: string]: any } }
 
+export type ScanQuery = {
+	where?: { [key: string]: any }
+	limit?: number
+	reverse?: boolean
+}
+
+export type QueryQuery = {
+	// Target (Can be record type or join name)
+	from: string
+
+	// Filter/Sort (Index)
+	where?: Record<string, any>
+	sort?: string[]
+	reverse?: boolean
+
+	// Aggregation
+	groupBy?: string[]
+	aggregate?: Record<string, "count" | "sum" | "min" | "max">
+	limit?: number
+}
+
+export type Change = {
+	type: string
+	oldRecord: any | null
+	newRecord: any | null
+}
+
+export type Reactor = (db: TupleDb, change: Change) => void
+
 export type RecordDb = {
 	// Args here contain primary key properties.
 	get: (args: { type: string; [key: string]: any }) => any | undefined
 	delete: (args: { type: string; [key: string]: any }) => void
 
-	// These ares are the entire record.
+	// These args are the entire record.
 	set: (record: { type: string; [key: string]: any }) => void
 
-	// Use the schema to layout the keys appropriately
-	aggregation: (name: string, args: { [key: string]: any }) => number
-
-	// Scan the index and use the schema to unroll ListArgs into a tuple with the appropriate key ordering.
-	index: (type: string, name: string, args: ScanArgs) => any[]
-
-	join: (name: string, args: ScanArgs) => { [key: string]: any }[]
+	// Unified Query API
+	query: (query: QueryQuery) => any
 }
 
 // ============================================================================
-// Index
+// Reactors
+// ============================================================================
+
+function createIndexReactor(schema: RecordDbSchema): Reactor {
+	return (db, change) => {
+		const { type, oldRecord, newRecord } = change
+		const recordSchema = schema.records[type]
+		if (!recordSchema || !recordSchema.indexes) return
+
+		for (const [indexName, fields] of Object.entries(recordSchema.indexes)) {
+			if (oldRecord) {
+				const keys = extractKey(oldRecord, fields)
+				db.delete([type, indexName, ...keys])
+			}
+			if (newRecord) {
+				const keys = extractKey(newRecord, fields)
+				db.set([type, indexName, ...keys], null)
+			}
+		}
+	}
+}
+
+function createAggregationReactor(schema: RecordDbSchema): Reactor {
+	return (db, change) => {
+		const { type, oldRecord, newRecord } = change
+		if (!schema.aggregations) return
+
+		for (const [name, def] of Object.entries(schema.aggregations)) {
+			if (def.source !== type) continue
+
+			// Determine value to aggregate
+			// For count, we effectively treat the value as 1.
+			// For sum/min/max, we extract the field.
+			const getVal = (r: any) => (def.kind === "count" ? 1 : r[def.field!])
+
+			if (oldRecord) {
+				const key = ["aggregation", name, ...extractKey(oldRecord, def.groupBy)]
+				const val = getVal(oldRecord)
+				updateAggregationValue(db, key, def.kind, -1, val)
+			}
+			if (newRecord) {
+				const key = ["aggregation", name, ...extractKey(newRecord, def.groupBy)]
+				const val = getVal(newRecord)
+				updateAggregationValue(db, key, def.kind, 1, val)
+			}
+		}
+	}
+}
+
+function createJoinReactor(schema: RecordDbSchema): Reactor {
+	return (db, change) => {
+		if (!schema.joins) return
+		const { type, oldRecord, newRecord } = change
+
+		for (const [name, def] of Object.entries(schema.joins)) {
+			if (oldRecord) updateJoin(db, schema, name, def, oldRecord, -1)
+			if (newRecord) updateJoin(db, schema, name, def, newRecord, 1)
+		}
+	}
+}
+
+function updateJoin(
+	db: TupleDb,
+	schema: RecordDbSchema,
+	joinName: string,
+	joinDef: JoinSchema,
+	record: any,
+	delta: number
+) {
+	const sides: ("left" | "right")[] = ["left", "right"]
+	for (const side of sides) {
+		const mySideDef = joinDef[side]
+		const otherSideDef = joinDef[side === "left" ? "right" : "left"]
+
+		if (record.type === mySideDef.type) {
+			const matches = findMatches(db, schema, otherSideDef, record[mySideDef.on])
+			for (const match of matches) {
+				const left = side === "left" ? record : match
+				const right = side === "right" ? record : match
+				const keyValues = joinDef.key.map(({ side: s, field }) =>
+					s === "left" ? left[field] : right[field]
+				)
+				increment(db, ["join", joinName, ...keyValues], delta)
+			}
+		}
+	}
+}
+
+// ============================================================================
+// Core Logic
 // ============================================================================
 
 function getRecord(
@@ -69,25 +183,45 @@ function getRecord(
 	return db.get([type, ...primaryKey])
 }
 
-function updateIndexes(
-	db: TupleDb,
-	type: string,
-	recordSchema: RecordSchema,
-	oldRecord: any,
-	newRecord: any
-) {
-	if (!recordSchema.indexes) return
-	for (const [indexName, fields] of Object.entries(recordSchema.indexes)) {
-		if (oldRecord) {
-			const keys = extractKey(oldRecord, fields)
-			db.delete([type, indexName, ...keys])
-		}
-		if (newRecord) {
-			const keys = extractKey(newRecord, fields)
-			db.set([type, indexName, ...keys], null)
-		}
-	}
+function setRecord(db: TupleDb, schema: RecordDbSchema, reactor: Reactor, record: any) {
+	const type = record.type
+	const recordSchema = schema.records[type]
+	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
+
+	const primaryKey = [type, ...extractKey(record, recordSchema.primary)]
+	const oldRecord = db.get(primaryKey)
+
+	// 1. Write Primary
+	db.set(primaryKey, record)
+
+	// 2. React
+	reactor(db, { type, oldRecord, newRecord: record })
 }
+
+function deleteRecord(
+	db: TupleDb,
+	schema: RecordDbSchema,
+	reactor: Reactor,
+	args: { type: string; [key: string]: any }
+) {
+	const { type } = args
+	const recordSchema = schema.records[type]
+	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
+
+	const primaryKey = [type, ...extractKey(args, recordSchema.primary)]
+	const oldRecord = db.get(primaryKey)
+	if (!oldRecord) return
+
+	// 1. Delete Primary
+	db.delete(primaryKey)
+
+	// 2. React
+	reactor(db, { type, oldRecord, newRecord: null })
+}
+
+// ============================================================================
+// Querying
+// ============================================================================
 
 function scanIndex(
 	db: TupleDb,
@@ -131,8 +265,94 @@ function scanIndex(
 		})
 }
 
+function scanSmart(db: TupleDb, schema: RecordDbSchema, type: string, query: ScanQuery): any[] {
+	const recordSchema = schema.records[type]
+	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
+
+	const { where = {}, limit, reverse } = query
+
+	// 1. Try to find a matching index
+	let bestIndex: string | undefined
+	let bestMatchLength = 0
+
+	if (recordSchema.indexes) {
+		for (const [name, fields] of Object.entries(recordSchema.indexes)) {
+			// Check how many prefix fields are satisfied by 'where'
+			let matchLength = 0
+			for (const field of fields) {
+				if (where[field] !== undefined) {
+					matchLength++
+				} else {
+					break
+				}
+			}
+
+			if (matchLength > bestMatchLength) {
+				bestMatchLength = matchLength
+				bestIndex = name
+			}
+		}
+	}
+
+	// 2. Use the best index if found
+	if (bestIndex) {
+		return scanIndex(db, schema, type, bestIndex, {
+			eq: where,
+			limit,
+			reverse,
+		})
+	}
+
+	// 3. Fallback: Check if we can use the primary key (scanIndex supports scanning primary if modeled as index?)
+	// Actually scanIndex expects a named secondary index.
+	// But we can check if the primary key prefix matches 'where'.
+	let primaryMatchLength = 0
+	for (const field of recordSchema.primary) {
+		if (where[field] !== undefined) primaryMatchLength++
+		else break
+	}
+
+	if (primaryMatchLength > 0) {
+		// Scan primary key prefix
+		const prefixTuple = unrollKey(where, recordSchema.primary)
+
+		// Optimization: Exact Primary Key Match
+		if (primaryMatchLength === recordSchema.primary.length) {
+			const val = db.get([type, ...prefixTuple])
+			return val ? [val] : []
+		}
+
+		// This is a direct primary scan
+		// We need to support 'where' filtering for non-key fields if we want full generality,
+		// but for now we assume 'where' implies equality lookup on index/primary.
+		// If there are leftover 'where' clauses not covered by index, we should technically filter results.
+		// But keeping it simple as per spec.
+
+		const listArgs: ListArgs<Tuple> = compactObj({
+			limit,
+			reverse,
+		})
+
+		// TODO: This doesn't strictly implement filtering for non-prefix fields in 'where'.
+		// But it matches the 'index' behavior.
+
+		return db
+			.subspace([type, ...prefixTuple])
+			.list(listArgs)
+			.map((i) => i.value)
+	}
+
+	// 4. Fallback: Full table scan (if no where clause or no matches)
+	// Only acceptable if we intended to scan everything.
+	if (Object.keys(where).length === 0) {
+		return db.subspace([type]).list({ limit, reverse }).map(i => i.value).filter(v => v !== null)
+	}
+
+	throw new Error(`No index found for query on ${type} with where: ${JSON.stringify(where)}`)
+}
+
 // ============================================================================
-// Aggregation
+// Aggregation Logic
 // ============================================================================
 
 function increment(db: TupleDb, key: Tuple, delta: number) {
@@ -145,20 +365,27 @@ function increment(db: TupleDb, key: Tuple, delta: number) {
 	}
 }
 
-function updateAggregation(
+function updateAggregationValue(
 	db: TupleDb,
-	aggName: string,
-	aggDef: AggregationSchema,
-	oldRecord: any,
-	newRecord: any
+	key: Tuple,
+	kind: AggregationSchema["kind"],
+	dir: 1 | -1,
+	val: any
 ) {
-	if (oldRecord) {
-		const key = ["aggregation", aggName, ...extractKey(oldRecord, aggDef.groupBy)]
-		increment(db, key, -1)
+	if (kind === "count") {
+		increment(db, key, dir)
+		return
 	}
-	if (newRecord) {
-		const key = ["aggregation", aggName, ...extractKey(newRecord, aggDef.groupBy)]
-		increment(db, key, 1)
+
+	if (kind === "sum") {
+		// Simple counter for sum
+		increment(db, key, (val as number) * dir)
+	} else if (kind === "min" || kind === "max") {
+		// Use a subspace to track values
+		// Key: [...prefix, value] = count
+		// When removing, decrement count. If 0, delete key.
+		const valueKey = [...key, val]
+		increment(db, valueKey, dir)
 	}
 }
 
@@ -171,12 +398,32 @@ function getAggregation(
 	const aggDef = schema.aggregations?.[aggName]
 	if (!aggDef) throw new Error(`Unknown aggregation: ${aggName}`)
 	const groupValues = extractKey(args, aggDef.groupBy)
-	const val = db.get(["aggregation", aggName, ...groupValues])
-	return typeof val === "number" ? val : 0
+	const baseKey = ["aggregation", aggName, ...groupValues]
+
+	if (aggDef.kind === "count" || aggDef.kind === "sum") {
+		const val = db.get(baseKey)
+		return typeof val === "number" ? val : 0
+	}
+
+	if (aggDef.kind === "min") {
+		// List first key in subspace
+		const res = db.subspace(baseKey).list({ limit: 1 })
+		if (res.length === 0) return 0 // Default? Or null?
+		return res[0].key[0] as number
+	}
+
+	if (aggDef.kind === "max") {
+		// List last key in subspace
+		const res = db.subspace(baseKey).list({ limit: 1, reverse: true })
+		if (res.length === 0) return 0
+		return res[0].key[0] as number
+	}
+
+	return 0
 }
 
 // ============================================================================
-// Join
+// Join Logic
 // ============================================================================
 
 function findMatches(db: TupleDb, schema: RecordDbSchema, sideDef: JoinSide, matchVal: any): any[] {
@@ -186,57 +433,11 @@ function findMatches(db: TupleDb, schema: RecordDbSchema, sideDef: JoinSide, mat
 		})
 	}
 	// Primary scan assumption: [type, matchVal, ...]
+	// This only works if matchVal is the first part of the primary key.
 	return db
 		.subspace([sideDef.type, matchVal])
 		.list()
 		.map((i) => i.value)
-}
-
-function updateJoinKey(
-	db: TupleDb,
-	joinName: string,
-	joinDef: JoinSchema,
-	left: any,
-	right: any,
-	delta: number
-) {
-	const keyValues = joinDef.key.map(({ side, field }) =>
-		side === "left" ? left[field] : right[field]
-	)
-	increment(db, ["join", joinName, ...keyValues], delta)
-}
-
-function updateJoin(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	joinName: string,
-	joinDef: JoinSchema,
-	oldRecord: any,
-	newRecord: any
-) {
-	const sides: ("left" | "right")[] = ["left", "right"]
-	for (const side of sides) {
-		const mySideDef = joinDef[side]
-		const otherSideDef = joinDef[side === "left" ? "right" : "left"]
-
-		if (oldRecord?.type === mySideDef.type) {
-			const matches = findMatches(db, schema, otherSideDef, oldRecord[mySideDef.on])
-			for (const match of matches) {
-				const left = side === "left" ? oldRecord : match
-				const right = side === "right" ? oldRecord : match
-				updateJoinKey(db, joinName, joinDef, left, right, -1)
-			}
-		}
-
-		if (newRecord?.type === mySideDef.type) {
-			const matches = findMatches(db, schema, otherSideDef, newRecord[mySideDef.on])
-			for (const match of matches) {
-				const left = side === "left" ? newRecord : match
-				const right = side === "right" ? newRecord : match
-				updateJoinKey(db, joinName, joinDef, left, right, 1)
-			}
-		}
-	}
 }
 
 function scanJoin(
@@ -274,87 +475,9 @@ function scanJoin(
 }
 
 // ============================================================================
-// Write
-// ============================================================================
-
-function triggerUpdates(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	type: string,
-	oldRecord: any,
-	newRecord: any
-) {
-	if (schema.aggregations) {
-		for (const [name, def] of Object.entries(schema.aggregations)) {
-			if (def.source === type) {
-				updateAggregation(db, name, def, oldRecord, newRecord)
-			}
-		}
-	}
-	if (schema.joins) {
-		for (const [name, def] of Object.entries(schema.joins)) {
-			updateJoin(db, schema, name, def, oldRecord, newRecord)
-		}
-	}
-}
-
-function setRecord(db: TupleDb, schema: RecordDbSchema, record: any) {
-	const type = record.type
-	const recordSchema = schema.records[type]
-	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
-
-	const primaryKey = [type, ...extractKey(record, recordSchema.primary)]
-	const oldRecord = db.get(primaryKey)
-
-	// 1. Write Primary
-	db.set(primaryKey, record)
-
-	// 2. Update Secondary Structures
-	updateIndexes(db, type, recordSchema, oldRecord, record)
-	triggerUpdates(db, schema, type, oldRecord, record)
-}
-
-function deleteRecord(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	args: { type: string; [key: string]: any }
-) {
-	const { type } = args
-	const recordSchema = schema.records[type]
-	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
-
-	const primaryKey = [type, ...extractKey(args, recordSchema.primary)]
-	const oldRecord = db.get(primaryKey)
-	if (!oldRecord) return
-
-	// 1. Delete Primary
-	db.delete(primaryKey)
-
-	// 2. Update Secondary Structures
-	updateIndexes(db, type, recordSchema, oldRecord, null)
-	triggerUpdates(db, schema, type, oldRecord, null)
-}
-
-// ============================================================================
-// RecordDb
-// ============================================================================
-
-export function recordDb(db: TupleDb, schema: RecordDbSchema): RecordDb {
-	return {
-		get: (args) => getRecord(db, schema, args),
-		set: (record) => setRecord(db, schema, record),
-		delete: (args) => deleteRecord(db, schema, args),
-		aggregation: (name, args) => getAggregation(db, schema, name, args),
-		index: (type, name, args) => scanIndex(db, schema, type, name, args),
-		join: (name, args) => scanJoin(db, schema, name, args),
-	}
-}
-
-// ============================================================================
 // Helpers
 // ============================================================================
 
-/** Throws error on failed extraction. */
 function extractKey(obj: any, fields: string[]): Tuple {
 	return fields.map((f) => {
 		if (obj[f] === undefined) throw new Error(`Missing key field: ${f}`)
@@ -362,7 +485,6 @@ function extractKey(obj: any, fields: string[]): Tuple {
 	})
 }
 
-/** Similar to extractKey but can stop early. */
 function unrollKey(obj: any, fields: string[]): Tuple {
 	const result: Tuple = []
 	if (!obj) return result
@@ -371,4 +493,259 @@ function unrollKey(obj: any, fields: string[]): Tuple {
 		else break
 	}
 	return result
+}
+
+function deepEqual(a: any, b: any): boolean {
+	return JSON.stringify(a) === JSON.stringify(b)
+}
+
+// ============================================================================
+// Dynamic Schema Management
+// ============================================================================
+
+function loadSchema(db: TupleDb): RecordDbSchema | null {
+	const val = db.get(["_schema", "current"])
+	if (!val) return null
+	return val as RecordDbSchema
+}
+
+function saveSchema(db: TupleDb, schema: RecordDbSchema) {
+	db.set(["_schema", "current"], schema)
+}
+
+function backfillIndex(db: TupleDb, schema: RecordDbSchema, type: string, indexName: string) {
+	const recordSchema = schema.records[type]
+	const indexFields = recordSchema.indexes?.[indexName]
+	if (!indexFields) return
+
+	// Iterate primary records of this type
+	const prefix = [type]
+	const records = db
+		.subspace(prefix)
+		.list()
+		.filter((item) => item.value !== null)
+		.map((item) => item.value)
+
+	for (const record of records) {
+		const keys = extractKey(record, indexFields)
+		db.set([type, indexName, ...keys], null)
+	}
+}
+
+function backfillAggregation(db: TupleDb, schema: RecordDbSchema, aggName: string) {
+	const aggDef = schema.aggregations?.[aggName]
+	if (!aggDef) return
+
+	const type = aggDef.source
+	const records = db
+		.subspace([type])
+		.list()
+		.filter((item) => item.value !== null)
+		.map((item) => item.value)
+
+	for (const record of records) {
+		const key = ["aggregation", aggName, ...extractKey(record, aggDef.groupBy)]
+		const getVal = (r: any) => (aggDef.kind === "count" ? 1 : r[aggDef.field!])
+		const val = getVal(record)
+		updateAggregationValue(db, key, aggDef.kind, 1, val)
+	}
+}
+
+// ============================================================================
+// Unified Query Processor
+// ============================================================================
+
+function processQuery(
+	db: TupleDb,
+	schema: RecordDbSchema,
+	q: QueryQuery
+): { schema: RecordDbSchema; result: any } {
+	let updatedSchema = schema
+	let schemaChanged = false
+
+	// Handle JOIN Query
+	if (schema.joins?.[q.from]) {
+		// Map QueryQuery to ScanArgs
+		const args: ScanArgs = {
+			eq: q.where,
+			limit: q.limit,
+			reverse: q.reverse,
+		}
+		return { schema: updatedSchema, result: scanJoin(db, schema, q.from, args) }
+	}
+
+	const recordSchema = schema.records[q.from]
+	if (!recordSchema) throw new Error(`Unknown type: ${q.from}`)
+
+	let bestIndexName: string | undefined
+
+	// 1. Ensure Index for 'where' + 'sort'
+	if (q.where || q.sort) {
+		const whereKeys = q.where ? Object.keys(q.where).sort() : []
+		const sortKeys = q.sort || []
+
+		// Construct a canonical index name
+		// Append primary key fields to ensure uniqueness and allow fetching
+		const neededFields = [...whereKeys, ...sortKeys, ...recordSchema.primary]
+		// Filter out duplicates if any (e.g. sorted by where clause field)
+		const uniqueFields = [...new Set(neededFields)]
+
+		if (deepEqual(uniqueFields, recordSchema.primary)) {
+			// Satisfied by primary key
+			bestIndexName = undefined
+		} else {
+			// Try to find existing index
+			if (recordSchema.indexes) {
+				for (const [name, fields] of Object.entries(recordSchema.indexes)) {
+					// Check if fields start with uniqueFields
+					if (fields.length >= uniqueFields.length) {
+						const prefix = fields.slice(0, uniqueFields.length)
+						if (deepEqual(prefix, uniqueFields)) {
+							bestIndexName = name
+							break
+						}
+					}
+				}
+			}
+
+			if (!bestIndexName && uniqueFields.length > 0) {
+				// Create Index!
+				const indexName = `auto_idx_${uniqueFields.join("_")}`
+
+				// Mutate schema copy
+				updatedSchema = JSON.parse(JSON.stringify(schema))
+				updatedSchema.records[q.from].indexes = updatedSchema.records[q.from].indexes || {}
+				updatedSchema.records[q.from].indexes![indexName] = uniqueFields
+
+				schemaChanged = true
+				bestIndexName = indexName
+
+				// Backfill happens after we commit schema change? No, "single transaction".
+				// We must backfill NOW.
+				backfillIndex(db, updatedSchema, q.from, indexName)
+			}
+		}
+	}
+
+	// 2. Ensure Aggregation
+	if (q.aggregate) {
+		for (const [alias, kind] of Object.entries(q.aggregate)) {
+			const groupBy = q.groupBy ? q.groupBy.sort() : []
+			let aggName: string | undefined
+
+			// Try to find existing matching aggregation
+			if (updatedSchema.aggregations) {
+				for (const [name, def] of Object.entries(updatedSchema.aggregations)) {
+					if (
+						def.source === q.from &&
+						def.kind === kind &&
+						deepEqual(def.groupBy.sort(), groupBy)
+					) {
+						// assuming order doesn't matter for grouping
+						aggName = name
+						break
+					}
+				}
+			}
+
+			// If not found, create new one
+			if (!aggName) {
+				aggName = `auto_agg_${q.from}_${kind}_${groupBy.join("_")}`
+
+				if (!updatedSchema.aggregations?.[aggName]) {
+					if (!updatedSchema.aggregations) updatedSchema.aggregations = {}
+					// Limitation: simplistic 'select' type in QueryQuery
+					// We assume 'count' or that the user provides necessary field info if we extend type.
+					// For now, if kind != count, we lack 'field'.
+
+					updatedSchema.aggregations[aggName] = {
+						source: q.from,
+						groupBy: groupBy,
+						kind: kind,
+						field: undefined, // TODO: Update QueryQuery to support field selection for sum/min/max
+					}
+
+					schemaChanged = true
+					backfillAggregation(db, updatedSchema, aggName)
+				}
+			}
+		}
+	}
+
+	if (schemaChanged) {
+		saveSchema(db, updatedSchema)
+	}
+
+	// Execute Query
+	if (q.aggregate) {
+		const result: any = {}
+		for (const [alias, kind] of Object.entries(q.aggregate)) {
+			// Resolve name again (could be existing or auto)
+			const groupBy = q.groupBy ? q.groupBy.sort() : []
+			let aggName: string | undefined
+			if (updatedSchema.aggregations) {
+				for (const [name, def] of Object.entries(updatedSchema.aggregations)) {
+					if (
+						def.source === q.from &&
+						def.kind === kind &&
+						deepEqual(def.groupBy.sort(), groupBy)
+					) {
+						aggName = name
+						break
+					}
+				}
+			}
+			if (!aggName) throw new Error("Aggregation logic error: name not found")
+
+			result[alias] = getAggregation(db, updatedSchema, aggName, q.where || {})
+		}
+		return { schema: updatedSchema, result }
+	}
+
+	if (bestIndexName) {
+		const results = scanIndex(db, updatedSchema, q.from, bestIndexName, {
+			eq: q.where,
+			limit: q.limit,
+			reverse: q.reverse,
+		})
+		return { schema: updatedSchema, result: results }
+	}
+
+	const results = scanSmart(db, updatedSchema, q.from, {
+		where: q.where,
+		limit: q.limit,
+		reverse: q.reverse,
+	})
+
+	return { schema: updatedSchema, result: results }
+}
+
+// ============================================================================
+// RecordDb
+// ============================================================================
+
+export function recordDb(db: TupleDb, initialSchema: RecordDbSchema): RecordDb {
+	// 1. Load schema from DB or use initial
+	let currentSchema = loadSchema(db)
+	if (!currentSchema) {
+		currentSchema = initialSchema
+		saveSchema(db, currentSchema)
+	}
+
+	const runReactors = (db: TupleDb, change: Change) => {
+		const s = loadSchema(db) || initialSchema
+		const reactors = [createIndexReactor(s), createAggregationReactor(s), createJoinReactor(s)]
+		for (const r of reactors) r(db, change)
+	}
+
+	return {
+		get: (args) => getRecord(db, loadSchema(db) || initialSchema, args),
+		set: (record) => setRecord(db, loadSchema(db) || initialSchema, runReactors, record),
+		delete: (args) => deleteRecord(db, loadSchema(db) || initialSchema, runReactors, args),
+		query: (q) => {
+			const s = loadSchema(db) || initialSchema
+			const { result } = processQuery(db, s, q)
+			return result
+		},
+	}
 }
