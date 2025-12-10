@@ -56,3 +56,14 @@ Next, we might want an index for aggregations. For example a count of follows an
 
 Help me to implement this. Try to keep things simple and ergonomic.
 
+
+---
+
+Lets prefer functional composition style rather than using a class for the record layer. only use classes when encapsulating state.
+
+```ts
+const tdb = tupleDb()
+const rdb = recordDb(tdb, schema)
+```
+
+Lets use similar verbs as we have for tupledb. Use set instead of put. And list instead of scan. And list args should be quite similar to tupleDb. The current scan args are just popping those first two args into the prefix. So really, its just subspace([type, index]).list(...).
