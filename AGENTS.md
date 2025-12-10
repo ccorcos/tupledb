@@ -42,6 +42,8 @@ New features should generally be implemented as wrappers around `Okv` rather tha
 *   **Framework**: Mocha (`npm test`).
 *   **Location**: Co-located `*.test.ts` files.
 
+To run individual tests, `npm test -- --grep=TESTNAME`
+
 ### 4. Code Style
 *   **Formatting**: Prettier (`npm run prettier`).
 *   **Imports**: Use explicit relative paths.

@@ -15,4 +15,4 @@ Create branches to experiment with new layers and implementations...
 ---
 
 
-I want to create a record layer with incremental view maintenance on top of tupledb.
+Taking it a step further, maybe want a feed of posts from followers of followers and we want to add and remove from this list as follows are created or deleted. But we only care about recent posts (datetime in the last 24 hours). Maybe we have a background job to cleanup or something, but the point is that we don't need to backfill everything.
