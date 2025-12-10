@@ -105,3 +105,8 @@ export type RecordDb = {
 	// Do something similar here that makes sense for joins.
 }
 
+
+---
+
+I want to think about improvements to @src/tupledb/RecordLayer.ts . What are some important missing features. What are some of the  ways we could improve the way we're specifying indexes, aggregations, and joins. I want you to do some research into an existing  implementation of IVM in mono/packages/zql/src/ivm and use that as inspiration for improving the record layer implementation. Note  that we don't want to use any of the zql code directly, but we do want to be inspired by their implementation details and ways we can improve our implementation. Please write you analysis in plans/zql.md for review.
+
