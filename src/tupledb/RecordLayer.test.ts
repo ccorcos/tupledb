@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { recordDb, RecordSchema } from "./RecordLayer"
+import { recordDb, RecordDbSchema } from "./RecordLayer"
 import { tupleDb } from "./TupleDb"
 
 // Define the types
@@ -15,8 +15,8 @@ type Notification = {
 	read: boolean
 }
 
-const schema: RecordSchema = {
-	types: {
+const schema: RecordDbSchema = {
+	records: {
 		user: {
 			primary: ["id"],
 			indexes: {

@@ -1,7 +1,7 @@
 import { compactObj } from "shared/compactObj"
 import { ListArgs, Tuple, TupleDb } from "./types"
 
-export type TypeSchema = {
+export type RecordSchema = {
 	primary: string[]
 	indexes?: { [name: string]: string[] }
 }
@@ -24,8 +24,8 @@ export type JoinSchema = {
 	key: { side: "left" | "right"; field: string }[]
 }
 
-export type RecordSchema = {
-	types: { [type: string]: TypeSchema }
+export type RecordDbSchema = {
+	records: { [type: string]: RecordSchema }
 	aggregations?: { [name: string]: AggregationSchema }
 	joins?: { [name: string]: JoinSchema }
 }
@@ -80,25 +80,25 @@ function increment(db: TupleDb, key: Tuple, delta: number) {
 
 function getRecord(
 	db: TupleDb,
-	schema: RecordSchema,
+	schema: RecordDbSchema,
 	args: { type: string; [key: string]: any }
 ): any {
 	const { type } = args
-	const typeSchema = schema.types[type]
-	if (!typeSchema) throw new Error(`Unknown type: ${type}`)
-	const primaryKey = extractKey(args, typeSchema.primary)
+	const recordSchema = schema.records[type]
+	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
+	const primaryKey = extractKey(args, recordSchema.primary)
 	return db.get([type, ...primaryKey])
 }
 
 function updateIndexes(
 	db: TupleDb,
 	type: string,
-	typeSchema: TypeSchema,
+	recordSchema: RecordSchema,
 	oldRecord: any,
 	newRecord: any
 ) {
-	if (!typeSchema.indexes) return
-	for (const [indexName, fields] of Object.entries(typeSchema.indexes)) {
+	if (!recordSchema.indexes) return
+	for (const [indexName, fields] of Object.entries(recordSchema.indexes)) {
 		if (oldRecord) {
 			const keys = extractKey(oldRecord, fields)
 			db.delete([type, indexName, ...keys])
@@ -143,21 +143,21 @@ function updateJoinKey(
 
 function scanIndex(
 	db: TupleDb,
-	schema: RecordSchema,
+	schema: RecordDbSchema,
 	type: string,
 	indexName: string,
 	args: ScanArgs
 ): any[] {
-	const typeSchema = schema.types[type]
-	if (!typeSchema) throw new Error(`Unknown type: ${type}`)
+	const recordSchema = schema.records[type]
+	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
 
-	const indexDef = typeSchema.indexes?.[indexName]
+	const indexDef = recordSchema.indexes?.[indexName]
 	if (!indexDef) throw new Error(`Unknown index: ${indexName}`)
 
 	// Map primary key fields to their position in the index definition
-	const primaryKeyIndex = typeSchema.primary.map((pkField) => {
-		const idx = indexDef.indexOf(pkField)
-		if (idx === -1) throw new Error(`Index ${indexName} missing PK field ${pkField}`)
+	const primaryKeyIndex = recordSchema.primary.map((field) => {
+		const idx = indexDef.indexOf(field)
+		if (idx === -1) throw new Error(`Index ${indexName} missing primary key field ${field}`)
 		return idx
 	})
 
@@ -183,7 +183,7 @@ function scanIndex(
 		})
 }
 
-function findMatches(db: TupleDb, schema: RecordSchema, sideDef: JoinSide, matchVal: any): any[] {
+function findMatches(db: TupleDb, schema: RecordDbSchema, sideDef: JoinSide, matchVal: any): any[] {
 	if (sideDef.index) {
 		return scanIndex(db, schema, sideDef.type, sideDef.index, {
 			eq: { [sideDef.on]: matchVal },
@@ -198,7 +198,7 @@ function findMatches(db: TupleDb, schema: RecordSchema, sideDef: JoinSide, match
 
 function updateJoin(
 	db: TupleDb,
-	schema: RecordSchema,
+	schema: RecordDbSchema,
 	joinName: string,
 	joinDef: JoinSchema,
 	oldRecord: any,
@@ -231,7 +231,7 @@ function updateJoin(
 
 function triggerUpdates(
 	db: TupleDb,
-	schema: RecordSchema,
+	schema: RecordDbSchema,
 	type: string,
 	oldRecord: any,
 	newRecord: any
@@ -250,48 +250,46 @@ function triggerUpdates(
 	}
 }
 
-function setRecord(db: TupleDb, schema: RecordSchema, record: any) {
+function setRecord(db: TupleDb, schema: RecordDbSchema, record: any) {
 	const type = record.type
-	const typeSchema = schema.types[type]
-	if (!typeSchema) throw new Error(`Unknown type: ${type}`)
+	const recordSchema = schema.records[type]
+	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
 
-	const pkValues = extractKey(record, typeSchema.primary)
-	const pk = [type, ...pkValues]
-	const oldRecord = db.get(pk)
+	const primaryKey = [type, ...extractKey(record, recordSchema.primary)]
+	const oldRecord = db.get(primaryKey)
 
 	// 1. Write Primary
-	db.set(pk, record)
+	db.set(primaryKey, record)
 
 	// 2. Update Secondary Structures
-	updateIndexes(db, type, typeSchema, oldRecord, record)
+	updateIndexes(db, type, recordSchema, oldRecord, record)
 	triggerUpdates(db, schema, type, oldRecord, record)
 }
 
 function deleteRecord(
 	db: TupleDb,
-	schema: RecordSchema,
+	schema: RecordDbSchema,
 	args: { type: string; [key: string]: any }
 ) {
 	const { type } = args
-	const typeSchema = schema.types[type]
-	if (!typeSchema) throw new Error(`Unknown type: ${type}`)
+	const recordSchema = schema.records[type]
+	if (!recordSchema) throw new Error(`Unknown type: ${type}`)
 
-	const pkValues = extractKey(args, typeSchema.primary)
-	const pk = [type, ...pkValues]
-	const oldRecord = db.get(pk)
+	const primaryKey = [type, ...extractKey(args, recordSchema.primary)]
+	const oldRecord = db.get(primaryKey)
 	if (!oldRecord) return
 
 	// 1. Delete Primary
-	db.delete(pk)
+	db.delete(primaryKey)
 
 	// 2. Update Secondary Structures
-	updateIndexes(db, type, typeSchema, oldRecord, null)
+	updateIndexes(db, type, recordSchema, oldRecord, null)
 	triggerUpdates(db, schema, type, oldRecord, null)
 }
 
 function getAggregation(
 	db: TupleDb,
-	schema: RecordSchema,
+	schema: RecordDbSchema,
 	aggName: string,
 	args: { [key: string]: any }
 ): number {
@@ -304,7 +302,7 @@ function getAggregation(
 
 function scanJoin(
 	db: TupleDb,
-	schema: RecordSchema,
+	schema: RecordDbSchema,
 	name: string,
 	args: ScanArgs
 ): { [key: string]: any }[] {
@@ -336,7 +334,7 @@ function scanJoin(
 		})
 }
 
-export function recordDb(db: TupleDb, schema: RecordSchema): RecordDb {
+export function recordDb(db: TupleDb, schema: RecordDbSchema): RecordDb {
 	return {
 		get: (args) => getRecord(db, schema, args),
 		set: (record) => setRecord(db, schema, record),
