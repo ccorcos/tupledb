@@ -13,14 +13,16 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
+
 what about aggregations across multiple tables... is there a use-case for that?
-
-Join side with the optional index... lets dig into that. Why is that there? We should generate recursive indexes here, no?
-
 Define an arbitrary reducer for more aggregation options.
 More aggregation types... sum, average, unique.
 
-Naming... records, aggregations, joins, indexes.
+
+
+
+Join side with the optional index... lets dig into that. Why is that there? We should generate recursive indexes here, no?
+
 
 
 
