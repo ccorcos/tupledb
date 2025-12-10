@@ -13,12 +13,7 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
-
-
-
-
-Get rid of `RecordListArgs` and just use `ListArgs<Tuple>`. I don't want prefix as an argument to list. That's what subspaces are for.
-
+what about aggregations across multiple tables... is there a use-case for that?
 
 Join side with the optional index... lets dig into that. Why is that there? We should generate recursive indexes here, no?
 
