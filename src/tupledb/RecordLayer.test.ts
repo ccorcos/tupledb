@@ -108,7 +108,7 @@ describe("RecordLayer", () => {
 		layer.set(user3)
 
 		// Scan index
-		const results = layer.index("user", "byName", { prefix: { name: "Alice" } })
+		const results = layer.index("user", "byName", { eq: { name: "Alice" } })
 		assert.equal(results.length, 2)
 		assert.deepEqual(results[0], user1)
 		assert.deepEqual(results[1], user3)
@@ -174,14 +174,14 @@ describe("RecordLayer", () => {
 		layer.set(f2)
 
 		// Check C's FoFs (Should be A)
-		// Join key: [toId, fromId] -> prefix: { toId: "C" }
-		const cFofs = layer.join("followersOfFollowers", { prefix: { toId: "C" } })
+		// Join key: [toId, fromId] -> eq: { toId: "C" }
+		const cFofs = layer.join("followersOfFollowers", { eq: { toId: "C" } })
 		assert.equal(cFofs.length, 1)
 		assert.equal(cFofs[0].fromId, "A")
 		assert.equal(cFofs[0].toId, "C")
 
 		layer.set(f3)
-		const dFofs = layer.join("followersOfFollowers", { prefix: { toId: "D" } })
+		const dFofs = layer.join("followersOfFollowers", { eq: { toId: "D" } })
 		assert.equal(dFofs.length, 1)
 		assert.equal(dFofs[0].fromId, "B")
 
@@ -189,13 +189,13 @@ describe("RecordLayer", () => {
 		layer.delete({ type: "follow", fromId: "B", toId: "C" })
 
 		// C's FoFs should be empty (link broken)
-		const cFofsAfter = layer.join("followersOfFollowers", { prefix: { toId: "C" } })
+		const cFofsAfter = layer.join("followersOfFollowers", { eq: { toId: "C" } })
 		assert.equal(cFofsAfter.length, 0)
 
 		// D's FoF was B (via C). C->D exists. B->C deleted.
 		// B->C was "Left" for the join (Left(B->C), Right(C->D) -> Join(D, B)).
 		// So D's FoF (B) should be removed.
-		const dFofsAfter = layer.join("followersOfFollowers", { prefix: { toId: "D" } })
+		const dFofsAfter = layer.join("followersOfFollowers", { eq: { toId: "D" } })
 		assert.equal(dFofsAfter.length, 0)
 	})
 })

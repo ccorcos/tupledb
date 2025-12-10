@@ -30,6 +30,8 @@ export type RecordSchema = {
 	joins?: { [name: string]: JoinSchema }
 }
 
+export type ScanArgs = ListArgs<{ [key: string]: any }> & { eq?: { [key: string]: any } }
+
 export type RecordDb = {
 	// Args here contain primary key properties.
 	get: (args: { type: string; [key: string]: any }) => any | undefined
@@ -42,16 +44,9 @@ export type RecordDb = {
 	aggregation: (name: string, args: { [key: string]: any }) => number
 
 	// Scan the index and use the schema to unroll ListArgs into a tuple with the appropriate key ordering.
-	index: (
-		type: string,
-		name: string,
-		args: ListArgs<{ [key: string]: any }> & { prefix?: { [key: string]: any } }
-	) => any[]
+	index: (type: string, name: string, args: ScanArgs) => any[]
 
-	join: (
-		name: string,
-		args: ListArgs<{ [key: string]: any }> & { prefix?: { [key: string]: any } }
-	) => { [key: string]: any }[]
+	join: (name: string, args: ScanArgs) => { [key: string]: any }[]
 }
 
 /** Throws error on failed extraction. */
@@ -151,7 +146,7 @@ function scanIndex(
 	schema: RecordSchema,
 	type: string,
 	indexName: string,
-	args: ListArgs<{ [key: string]: any }>
+	args: ScanArgs
 ): any[] {
 	const typeSchema = schema.types[type]
 	if (!typeSchema) throw new Error(`Unknown type: ${type}`)
@@ -166,20 +161,24 @@ function scanIndex(
 		return idx
 	})
 
+	const prefixTuple = args.eq ? unrollKey(args.eq, indexDef) : []
+	const remainingFields = indexDef.slice(prefixTuple.length)
+
 	const listArgs: ListArgs<Tuple> = compactObj({
 		limit: args.limit,
 		reverse: args.reverse,
-		gt: args.gt ? unrollKey(args.gt, indexDef) : undefined,
-		gte: args.gte ? unrollKey(args.gte, indexDef) : undefined,
-		lt: args.lt ? unrollKey(args.lt, indexDef) : undefined,
-		lte: args.lte ? unrollKey(args.lte, indexDef) : undefined,
+		gt: args.gt ? unrollKey(args.gt, remainingFields) : undefined,
+		gte: args.gte ? unrollKey(args.gte, remainingFields) : undefined,
+		lt: args.lt ? unrollKey(args.lt, remainingFields) : undefined,
+		lte: args.lte ? unrollKey(args.lte, remainingFields) : undefined,
 	})
 
 	return db
-		.subspace([type, indexName])
+		.subspace([type, indexName, ...prefixTuple])
 		.list(listArgs)
 		.map(({ key }) => {
-			const primaryKey = primaryKeyIndex.map((idx) => key[idx])
+			const fullIndexValues = [...prefixTuple, ...key]
+			const primaryKey = primaryKeyIndex.map((idx) => fullIndexValues[idx])
 			return db.get([type, ...primaryKey])
 		})
 }
@@ -187,8 +186,7 @@ function scanIndex(
 function findMatches(db: TupleDb, schema: RecordSchema, sideDef: JoinSide, matchVal: any): any[] {
 	if (sideDef.index) {
 		return scanIndex(db, schema, sideDef.type, sideDef.index, {
-			gte: { [sideDef.on]: matchVal },
-			lte: { [sideDef.on]: matchVal },
+			eq: { [sideDef.on]: matchVal },
 		})
 	}
 	// Primary scan assumption: [type, matchVal, ...]
@@ -308,29 +306,32 @@ function scanJoin(
 	db: TupleDb,
 	schema: RecordSchema,
 	name: string,
-	args: ListArgs<{ [key: string]: any }>
+	args: ScanArgs
 ): { [key: string]: any }[] {
 	const joinDef = schema.joins?.[name]
 	if (!joinDef) throw new Error(`Unknown join: ${name}`)
 
 	const keyFields = joinDef.key.map((k) => k.field)
+	const prefixTuple = args.eq ? unrollKey(args.eq, keyFields) : []
+	const remainingFields = keyFields.slice(prefixTuple.length)
 
 	const listArgs: ListArgs<Tuple> = compactObj({
 		limit: args.limit,
 		reverse: args.reverse,
-		gt: args.gt ? unrollKey(args.gt, keyFields) : undefined,
-		gte: args.gte ? unrollKey(args.gte, keyFields) : undefined,
-		lt: args.lt ? unrollKey(args.lt, keyFields) : undefined,
-		lte: args.lte ? unrollKey(args.lte, keyFields) : undefined,
+		gt: args.gt ? unrollKey(args.gt, remainingFields) : undefined,
+		gte: args.gte ? unrollKey(args.gte, remainingFields) : undefined,
+		lt: args.lt ? unrollKey(args.lt, remainingFields) : undefined,
+		lte: args.lte ? unrollKey(args.lte, remainingFields) : undefined,
 	})
 
 	return db
-		.subspace(["join", name])
+		.subspace(["join", name, ...prefixTuple])
 		.list(listArgs)
 		.filter((item) => (item.value as number) > 0)
 		.map(({ key }) => {
+			const fullKey = [...prefixTuple, ...key]
 			const obj: any = {}
-			for (const [i, f] of keyFields.entries()) obj[f] = key[i]
+			for (const [i, f] of keyFields.entries()) obj[f] = fullKey[i]
 			return obj
 		})
 }
