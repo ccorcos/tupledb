@@ -20,7 +20,6 @@ export type AggregationSchema = {
 export type JoinSide = {
 	type: string
 	on: string
-	index?: string // Index to use for lookup. If undefined, attempts primary scan.
 }
 
 export type JoinSchema = {
@@ -171,6 +170,14 @@ function updateJoin(
 // Core Logic
 // ============================================================================
 
+function checkMatch(record: any, where: { [key: string]: any } | undefined): boolean {
+	if (!where) return true
+	for (const [key, val] of Object.entries(where)) {
+		if (record[key] !== val) return false
+	}
+	return true
+}
+
 function getRecord(
 	db: TupleDb,
 	schema: RecordDbSchema,
@@ -296,11 +303,12 @@ function scanSmart(db: TupleDb, schema: RecordDbSchema, type: string, query: Sca
 
 	// 2. Use the best index if found
 	if (bestIndex) {
-		return scanIndex(db, schema, type, bestIndex, {
+		const results = scanIndex(db, schema, type, bestIndex, {
 			eq: where,
 			limit,
 			reverse,
 		})
+		return results.filter((r) => checkMatch(r, where))
 	}
 
 	// 3. Fallback: Check if we can use the primary key (scanIndex supports scanning primary if modeled as index?)
@@ -319,27 +327,22 @@ function scanSmart(db: TupleDb, schema: RecordDbSchema, type: string, query: Sca
 		// Optimization: Exact Primary Key Match
 		if (primaryMatchLength === recordSchema.primary.length) {
 			const val = db.get([type, ...prefixTuple])
-			return val ? [val] : []
+			return val && checkMatch(val, where) ? [val] : []
 		}
 
 		// This is a direct primary scan
-		// We need to support 'where' filtering for non-key fields if we want full generality,
-		// but for now we assume 'where' implies equality lookup on index/primary.
-		// If there are leftover 'where' clauses not covered by index, we should technically filter results.
-		// But keeping it simple as per spec.
+		// We support 'where' filtering for non-key fields using checkMatch.
 
 		const listArgs: ListArgs<Tuple> = compactObj({
 			limit,
 			reverse,
 		})
 
-		// TODO: This doesn't strictly implement filtering for non-prefix fields in 'where'.
-		// But it matches the 'index' behavior.
-
 		return db
 			.subspace([type, ...prefixTuple])
 			.list(listArgs)
 			.map((i) => i.value)
+			.filter((r) => checkMatch(r, where))
 	}
 
 	// 4. Fallback: Full table scan (if no where clause or no matches)
@@ -427,17 +430,9 @@ function getAggregation(
 // ============================================================================
 
 function findMatches(db: TupleDb, schema: RecordDbSchema, sideDef: JoinSide, matchVal: any): any[] {
-	if (sideDef.index) {
-		return scanIndex(db, schema, sideDef.type, sideDef.index, {
-			eq: { [sideDef.on]: matchVal },
-		})
-	}
-	// Primary scan assumption: [type, matchVal, ...]
-	// This only works if matchVal is the first part of the primary key.
-	return db
-		.subspace([sideDef.type, matchVal])
-		.list()
-		.map((i) => i.value)
+	return scanSmart(db, schema, sideDef.type, {
+		where: { [sideDef.on]: matchVal },
+	})
 }
 
 function scanJoin(
@@ -640,12 +635,10 @@ function processQuery(
 		const leftRes = ensureIndex(db, updatedSchema, joinDef.left.type, [joinDef.left.on])
 		updatedSchema = leftRes.schema
 		schemaChanged = schemaChanged || leftRes.schemaChanged
-		joinDef.left.index = leftRes.indexName
 
 		const rightRes = ensureIndex(db, updatedSchema, joinDef.right.type, [joinDef.right.on])
 		updatedSchema = rightRes.schema
 		schemaChanged = schemaChanged || rightRes.schemaChanged
-		joinDef.right.index = rightRes.indexName
 
 		// Generate Join Name
 		const joinName = `auto_join_${joinDef.left.type}_${joinDef.left.on}_${joinDef.right.type}_${joinDef.right.on}`

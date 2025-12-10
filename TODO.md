@@ -14,9 +14,33 @@ Create branches to experiment with new layers and implementations...
 ---
 
 
-In RecordLayer.test.ts we're still specifying indexes. Lets get rid of all those indexes and allow them to be generated. Lets make sure to assert not only that the query response is correct,  but that the index itself was generated.
 
-We also need some way of specifying join queries so that those indexes can be automatically generated along with any necessary intermediate indexes. We should delete followersOfFollowers join in the schema definition and also assert that it gets generated upon querying.
+const joinDef: JoinSchema = {
+	left: {follow: "toId"}
+	right: {follow: "fromId"}
+	key: [
+		{right: "toId"}, // User
+		{left: "fromId"} // FoF
+	],
+}
+
+
+
+timeline feed: posts by follows.
+identity feed: posts by followers.
+discovery feed: posts by follows of follows.
+
+
+data type validation.
+
+how does zql handle migrations / creating new record types or changing the schema.
+
+how to LRU the indexes and purge them when they're unused for too long.
+
+how does sql handle sync to the client?
+
+can we run a query, gather all the objects necessary to create all the intermediate indexes, send it to the client, and let the client re-index and run that query... I suppose the one issue here might be permissions, if there are hidden record permissions that a user may not be privvy to that's used to generate the index. THat seems really rare though. Can you come up with a realistic example?
+
 
 
 ---

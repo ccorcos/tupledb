@@ -116,3 +116,10 @@ I want to think about improvements to @src/tupledb/RecordLayer.ts . What are som
 Can we replace aggregation, index, and join methods with just a single `query` that will dynamically create the necessary indexes and maintain them? It seems like that's what zql is doing right?
 
 
+---
+
+
+In RecordLayer.test.ts we're still specifying indexes. Lets get rid of all those indexes and allow them to be generated. Lets make sure to assert not only that the query response is correct,  but that the index itself was generated.
+
+We also need some way of specifying join queries so that those indexes can be automatically generated along with any necessary intermediate indexes. We should delete followersOfFollowers join in the schema definition and also assert that it gets generated upon querying.
+

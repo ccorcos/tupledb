@@ -122,7 +122,7 @@ export function TupleSubspaceEncoder(prefix: Tuple): Encoder<Tuple, Tuple> {
 
 function constraintToSubspace(args: ListArgs<Tuple>, prefix: Tuple) {
 	const newArgs = { ...args }
-	if (newArgs.gt === undefined && newArgs.gte === undefined) newArgs.gt = prefix
+	if (newArgs.gt === undefined && newArgs.gte === undefined) newArgs.gte = prefix
 	if (newArgs.lt === undefined && newArgs.lte === undefined)
 		newArgs.lte = [...prefix, ...Array(10).fill(null)]
 	return newArgs

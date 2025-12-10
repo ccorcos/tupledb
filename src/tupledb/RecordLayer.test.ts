@@ -251,4 +251,27 @@ describe("RecordLayer", () => {
 		})
 		assert.equal(dFofsAfter.length, 0)
 	})
+
+	it("should filter results when query includes fields not in the index/primary key", () => {
+		const user: User = { type: "user", id: "u99", name: "Target", bio: "Match" }
+		layer.set(user)
+
+		// 1. Query by Primary Key + Mismatching Field
+		// The primary key 'id' matches, but 'bio' does not.
+		// If scanSmart doesn't filter, it will return the user because it does a direct db.get().
+		const results = layer.query({
+			from: "user",
+			where: { id: "u99", bio: "NoMatch" },
+		})
+
+		assert.equal(results.length, 0, "Should return 0 results due to mismatched 'bio'")
+
+		// 2. Query by Primary Key + Matching Field
+		const resultsMatch = layer.query({
+			from: "user",
+			where: { id: "u99", bio: "Match" },
+		})
+		assert.equal(resultsMatch.length, 1)
+		assert.deepEqual(resultsMatch[0], user)
+	})
 })
