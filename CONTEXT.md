@@ -1,3 +1,5 @@
+(Flattened context for dropping this straight into an AI chat prompt.)
+
 I've created a simple foundationdb-inspired database in TypeScript. It leans heavily on functional composition.
 
 ```ts

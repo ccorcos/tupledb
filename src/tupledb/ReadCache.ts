@@ -1,5 +1,6 @@
 import { ListArgs, Okv, TupleOkv, WriteArgs } from "./types"
 
+/** This is useful for keeping track of reads so we can send them to the frontent cache. */
 export class ReadCache<K, V> implements Okv<K, V> {
 	reads: {
 		args: ListArgs<K>

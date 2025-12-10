@@ -1,6 +1,8 @@
 # TupleDb
 
-This is a simple implemention of a tuple database. It's synchonous only which has its limitations, but computers are fast these days and I don't expect I will need an async version of this for some time.
+This is a simple implemention of a foundationdb-inspired tuple database written in TypeScript.
+
+The goal is to use this database on top of SQLite on a Node.js server and in-memory in the browser. Using the same database abstractions in both places makes it much easier to build web apps with optimistic updates and offline tolerance.
 
 ## Okv
 
@@ -16,11 +18,11 @@ export type Okv<K, V> = {
 
 Most persisted okv's will store string keys and string values such as Sqlite: `class SQLiteOkv implements Okv<string, string>`.
 
-When building an in-memory okv however, we don't need to serialize values so we get `Okv<string, any>` for free.
+When building an in-memory okv however, we don't need to serialize values so we get `Okv<string | number, any>` for free.
 
 ## TupleOkv
 
-To get a tuple database, we need to do some encoding of tuples into lexicographically ordered strings and wrap the Okv api. That's exactly what the functions in `Encodings.ts` help with. In practice, you can just do this:
+To get a tuple database, we need to do some encoding of tuples into lexicographically ordered strings and wrap the Okv api. That's exactly what the functions in `Codec.ts` help with. In practice, you can just do this:
 
 ```ts
 // For a persisted database
@@ -33,7 +35,7 @@ While we can do `tupleOkv(new InMemoryDatabase())`, we'd be serializing keys whe
 
 ## TupleDb
 
-The base tupleDb is great for building abstractions on top of, but it's a bit cumbersome to use and thats what `tupleDb` is for.
+The base tupleDb is great for building abstractions on top of, but it's a bit cumbersome to use and that's what `tupleDb` is for.
 
 ```ts
 const db = tupleDb(base)
@@ -47,9 +49,31 @@ const users = db.subspace(["users"])
 users.set(2, { id: 2, name: "Simon" })
 ```
 
+Functions compose really well for writing to the database. You have full flexibility to update indexes and fan out however you want.
+
+```ts
+function fanoutSendMessage(tx: TupleDb, msg: Message) {
+	for (const to of msg) tx.set(["inbox", to, msg.timestamp, msg.id], null)
+}
+
+function sendMessage(tx: TupleDb, msg: Message) {
+	tx.set(["message", msg.id], msg)
+	fanoutSendMessage(msg)
+	// More firebase-inspired way to index messages nested inside the user.
+	tx.subspace(["user", msg.from]).set(["sent", msg.timestamp, msg.id], msg)
+}
+
+const tx = tupleTx()
+sendMessage(tx, msg)
+tx.commit()
+```
+
+Transactions will batch all writes, but it doesn't do any actual concurrency control. That shouldn't be necessary though since the database is synchronous.
+
+
 ## Cache
 
-The `Cache` is the workhorse of the client-side database.
+The `Cache` is the workhorse of the client-side database. However it's pretty minimal and we need to build some more abstractions to make the entire system work well.
 
 ```ts
 const cache = new Cache<Tuple, JSONValue>(codec.compare)
