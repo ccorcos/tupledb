@@ -61,6 +61,13 @@ describe("RecordLayer", () => {
 		assert.equal(db.get(newIndexKey), null)
 	})
 
+	it("breaks due to indexes laid out alongside the primary key", () => {
+		const users1 = db.list({ gte: ["user", "primary"], lte: ["user", "primary", null] })
+		const users2 = layer.query({ from: "user" })
+		assert.equal(users1.length, 1)
+		assert.equal(users2.length, 1)
+	})
+
 	it("should handle secondary lookups via query", () => {
 		const user1: User = { type: "user", id: "u1", name: "Alice", bio: "" }
 		const user2: User = { type: "user", id: "u2", name: "Bob", bio: "" }

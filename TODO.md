@@ -15,6 +15,22 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
+export type RecordSchema = {
+	primary: string[]
+	indexes?: { [name: string]: string[] }
+}
+
+
+
+This refactor over the last two commits looks good. Seems like we can clean things up more though. Lets get rid of any unused code or abstractions. EnsurePerfectIndex has schemaChanged which doesnt appear to be used anywhere...
+
+
+I don't like referring to the primary index as indexName: undefined. Lets think of a better way of doing it. Maybe its just returning the actual prefix like {prefix: string[], fields: string[]}.
+
+
+
+
+
 It seems indexes and queries are redundant definitions... `indexes: { [name: string]: string[] }` is equivalent to just `{sort: string[]}` which is just a query.
 
 
@@ -25,6 +41,11 @@ export type AggregationSchema = {
 	field?: string // Required for sum, min, max
 }
 
+query = {
+	from: string,
+	where: Record<string, any>,
+	aggregate:
+}
 
 
 

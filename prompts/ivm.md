@@ -162,3 +162,11 @@ I think its important that we don't use checkMatch in order to avoid generating 
 ---
 
 IndexMatch could be a bit cleaner... Just {name: string, fields: string[]} | undefined. We can determine if its a full match based on fields.length.
+
+---
+
+
+
+
+
+---

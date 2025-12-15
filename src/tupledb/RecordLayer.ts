@@ -489,23 +489,12 @@ function processRecordQuery(db: TupleDb, schema: RecordDbSchema, type: string, q
 	const perfectIndex = res.indexName
 
 	// 2. Scan
-	let results: any[]
-	if (perfectIndex) {
-		results = scanIndex(db, res.schema, type, perfectIndex, {
-			eq: q.where,
-			limit: q.limit,
-			reverse: q.reverse,
-		})
-	} else {
-		// Fallback: Primary Key Scan (Perfect Match)
-		const primary = schema.records[type].primary
-		const prefix = q.where ? unrollKey(q.where, primary) : []
-		results = db
-			.subspace([type, ...prefix])
-			.list({ limit: q.limit, reverse: q.reverse })
-			.map((i) => i.value)
-			.filter((r) => r !== null)
-	}
+	// We can assert perfectIndex is defined because ensurePerfectIndex now always returns 'primary' or a named index.
+	const results = scanIndex(db, res.schema, type, perfectIndex!, {
+		eq: q.where,
+		limit: q.limit,
+		reverse: q.reverse,
+	})
 
 	return { schema: res.schema, result: results }
 }
@@ -517,12 +506,12 @@ function ensurePerfectIndex(
 	schema: RecordDbSchema,
 	type: string,
 	requiredPrefix: string[]
-): { schema: RecordDbSchema; indexName: string | undefined; schemaChanged: boolean } {
+): { schema: RecordDbSchema; indexName: string; schemaChanged: boolean } {
 	const primary = schema.records[type].primary
 	const needed = [...new Set([...requiredPrefix, ...primary])]
 
 	// If Primary Key works, use it (return undefined indexName)
-	if (deepEqual(needed, primary)) return { schema, indexName: undefined, schemaChanged: false }
+	if (deepEqual(needed, primary)) return { schema, indexName: "primary", schemaChanged: false }
 
 	// Check existing
 	const existing = Object.entries(schema.records[type].indexes || {}).find(([_, fields]) => {
@@ -555,7 +544,7 @@ function scanAllRecords(db: TupleDb, type: string): any[] {
 	// Scans the table using the most efficient method available (Primary Key scan usually)
 	// Ignores 'where' clauses, returns everything.
 	return db
-		.subspace([type])
+		.subspace([type, "primary"])
 		.list()
 		.map((i) => i.value)
 		.filter((v) => v !== null)
@@ -568,7 +557,10 @@ function scanIndex(
 	indexName: string,
 	args: ScanArgs
 ): any[] {
-	const fields = schema.records[type].indexes![indexName]
+	const fields =
+		indexName === "primary"
+			? schema.records[type].primary
+			: schema.records[type].indexes![indexName]
 	const primary = schema.records[type].primary
 
 	// Map index fields to primary key positions
@@ -587,7 +579,7 @@ function scanIndex(
 		.map(({ key }) => {
 			const fullKey = [...prefixTuple, ...key]
 			const pk = pkMap.map((idx) => fullKey[idx])
-			return db.get([type, ...pk])
+			return db.get([type, "primary", ...pk])
 		})
 }
 
@@ -670,16 +662,16 @@ export function recordDb(db: TupleDb, initialSchema: RecordDbSchema): RecordDb {
 			reload()
 			const schema = cachedSchema
 			const pk = extractKey(args, schema.records[args.type].primary)
-			return db.get([args.type, ...pk])
+			return db.get([args.type, "primary", ...pk])
 		},
 		delete: (args) => {
 			reload()
 			const schema = cachedSchema
 			const pk = extractKey(args, schema.records[args.type].primary)
-			const oldRecord = db.get([args.type, ...pk])
+			const oldRecord = db.get([args.type, "primary", ...pk])
 			if (!oldRecord) return
 
-			db.delete([args.type, ...pk])
+			db.delete([args.type, "primary", ...pk])
 			notifyReactors(db, schema, { type: args.type, oldRecord, newRecord: null })
 		},
 		set: (record) => {
@@ -687,9 +679,9 @@ export function recordDb(db: TupleDb, initialSchema: RecordDbSchema): RecordDb {
 			const schema = cachedSchema
 			const { type } = record
 			const pk = extractKey(record, schema.records[type].primary)
-			const oldRecord = db.get([type, ...pk])
+			const oldRecord = db.get([type, "primary", ...pk])
 
-			db.set([type, ...pk], record)
+			db.set([type, "primary", ...pk], record)
 			notifyReactors(db, schema, { type, oldRecord, newRecord: record })
 		},
 		query: (q) => {
