@@ -1,4 +1,5 @@
 import { cloneDeep, isEqual, union } from "lodash-es"
+import md5 from "md5"
 import { compactObj } from "shared/compactObj"
 import { ListArgs, Tuple, TupleDb } from "./types"
 
@@ -6,16 +7,8 @@ import { ListArgs, Tuple, TupleDb } from "./types"
 // Types
 // ============================================================================
 
-export type RecordSchema = {
+export type TypeSchema = {
 	primary: string[]
-	[index: string]: string[]
-}
-
-export type AggregationSchema = {
-	source: string
-	groupBy: string[]
-	kind: "count" | "sum" | "min" | "max"
-	field?: string // Required for sum, min, max
 }
 
 export type JoinSide = {
@@ -29,33 +22,32 @@ export type JoinSchema = {
 	key: { side: "left" | "right"; field: string }[]
 }
 
-export type RecordDbSchema = {
-	records: { [type: string]: RecordSchema }
-	aggregations?: { [name: string]: AggregationSchema }
-	joins?: { [name: string]: JoinSchema }
+export type AggregationOp = {
+	kind: "count" | "sum" | "min" | "max"
+	field?: string
 }
 
-export type ScanArgs = ListArgs<{ [key: string]: any }> & { eq?: { [key: string]: any } }
-
-export type ScanQuery = {
+export type IndexDefinition = {
+	from: string | JoinSchema
 	where?: { [key: string]: any }
-	limit?: number
-	reverse?: boolean
+	sort?: string[]
+	groupBy?: string[]
+	aggregate?: { [alias: string]: AggregationOp }
+}
+
+export type Schema = {
+	types: { [name: string]: TypeSchema }
+	indexes: { [name: string]: IndexDefinition }
 }
 
 export type QueryQuery = {
-	// Target (Can be record type or join name)
 	from: string | JoinSchema
-
-	// Filter/Sort (Index)
 	where?: Record<string, any>
 	sort?: string[]
 	reverse?: boolean
-
-	// Aggregation
-	groupBy?: string[]
-	aggregate?: Record<string, "count" | "sum" | "min" | "max">
 	limit?: number
+	groupBy?: string[]
+	aggregate?: Record<string, AggregationOp>
 }
 
 export type Change = {
@@ -65,240 +57,356 @@ export type Change = {
 }
 
 export type RecordDb = {
-	// Args here contain primary key properties.
 	get: (args: { type: string; [key: string]: any }) => any | undefined
 	delete: (args: { type: string; [key: string]: any }) => void
-
-	// These args are the entire record.
 	set: (record: { type: string; [key: string]: any }) => void
-
-	// Unified Query API
 	query: (query: QueryQuery) => any
 }
 
 // ============================================================================
-// Strategy Implementations
+// Schema Management
 // ============================================================================
 
-// Re-implementing the specific logic objects to capture the full context (Name + Def)
+function loadSchema(db: TupleDb): Schema {
+	const schema: Schema = { types: {}, indexes: {} }
 
-function updateRecordIndex(
-	db: TupleDb,
-	type: string,
-	indexName: string,
-	fields: string[],
-	record: any,
-	delta: number
-) {
-	const keys = extractKey(record, fields)
-	const dbKey = [type, indexName, ...keys]
-	if (delta === 1) db.set(dbKey, null)
-	else db.delete(dbKey)
-}
-
-function updateAggregationIndex(
-	db: TupleDb,
-	name: string,
-	def: AggregationSchema,
-	record: any,
-	delta: number
-) {
-	const groupKey = ["aggregation", name, ...extractKey(record, def.groupBy)]
-	const val = def.kind === "count" ? 1 : record[def.field!]
-
-	if (def.kind === "count") {
-		increment(db, groupKey, delta)
-	} else if (def.kind === "sum") {
-		increment(db, groupKey, (val as number) * delta)
-	} else if (def.kind === "min" || def.kind === "max") {
-		const valueKey = [...groupKey, val]
-		increment(db, valueKey, delta)
+	// Load Types
+	const types = db.subspace(["_schema", "types"]).list()
+	for (const { key, value } of types) {
+		schema.types[key[0] as string] = value as TypeSchema
 	}
+
+	// Load Indexes
+	const indexes = db.subspace(["_schema", "indexes"]).list()
+	for (const { key, value } of indexes) {
+		schema.indexes[key[0] as string] = value as IndexDefinition
+	}
+
+	return schema
 }
 
-function updateJoinIndex(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	joinName: string,
-	def: JoinSchema,
-	record: any,
-	delta: number
-) {
-	// Joins are bidirectional. We check which side 'record' belongs to.
-	const sides: ("left" | "right")[] = ["left", "right"]
-	for (const side of sides) {
-		const mySideDef = def[side]
-		const otherSideDef = def[side === "left" ? "right" : "left"]
+function saveType(db: TupleDb, name: string, def: TypeSchema) {
+	db.set(["_schema", "types", name], def)
+}
 
-		if (record.type === mySideDef.type) {
-			// 1. Find matches on the other side
-			const matches = findMatches(db, schema, otherSideDef, record[mySideDef.on])
+function saveIndex(db: TupleDb, name: string, def: IndexDefinition) {
+	db.set(["_schema", "indexes", name], def)
+}
 
-			// 2. For each match, update the join table
-			for (const match of matches) {
-				const left = side === "left" ? record : match
-				const right = side === "right" ? record : match
-				const keyValues = def.key.map(({ side: s, field }) =>
-					s === "left" ? left[field] : right[field]
-				)
-				increment(db, ["join", joinName, ...keyValues], delta)
-			}
+// Helper to initialize schema if empty
+function ensureSchema(db: TupleDb, initialSchema: Schema) {
+	const current = loadSchema(db)
+	if (Object.keys(current.types).length === 0 && Object.keys(current.indexes).length === 0) {
+		for (const [name, def] of Object.entries(initialSchema.types)) {
+			saveType(db, name, def)
+		}
+		for (const [name, def] of Object.entries(initialSchema.indexes)) {
+			saveIndex(db, name, def)
 		}
 	}
 }
 
 // ============================================================================
-// Core Update Loop (The "Write" Path)
+// Write Path: View Maintenance
 // ============================================================================
 
-function updateIndexes(db: TupleDb, schema: RecordDbSchema, change: Change) {
+function updateMaterializedViews(db: TupleDb, schema: Schema, change: Change) {
 	const { type, oldRecord, newRecord } = change
 
-	// Helper to apply +/- logic
 	const update = (fn: (r: any, d: number) => void) => {
 		if (oldRecord) fn(oldRecord, -1)
 		if (newRecord) fn(newRecord, 1)
 	}
 
-	// 1. Indexes
-	const recordSchema = schema.records[type]
-	if (recordSchema) {
-		for (const [name, fields] of Object.entries(recordSchema)) {
-			if (name === "primary") continue
-			update((r, d) => updateRecordIndex(db, type, name, fields, r, d))
+	for (const [indexName, def] of Object.entries(schema.indexes)) {
+		// 1. Join View
+		if (typeof def.from !== "string") {
+			update((r, d) => updateJoinView(db, schema, indexName, def.from as JoinSchema, r, d))
+			continue
+		}
+
+		// 2. Standard / Aggregation View (Single Source)
+		if (def.from === type) {
+			if (def.aggregate) {
+				update((r, d) => updateAggregationView(db, indexName, def, r, d))
+			} else {
+				update((r, d) => updateStandardViewWithSchema(db, schema, type, indexName, def, r, d))
+			}
 		}
 	}
+}
 
-	// 2. Aggregations
-	if (schema.aggregations) {
-		for (const [name, def] of Object.entries(schema.aggregations)) {
-			if (def.source === type) {
-				update((r, d) => updateAggregationIndex(db, name, def, r, d))
+function updateStandardViewWithSchema(
+	db: TupleDb,
+	schema: Schema,
+	type: string,
+	indexName: string,
+	def: IndexDefinition,
+	record: any,
+	delta: number
+) {
+	if (def.where && !matchWhere(record, def.where)) return
+
+	const sortKeys = def.sort || []
+
+	// We need to fetch the primary key definition for this type to ensure uniqueness
+	const typeDef = schema.types[type]
+	if (!typeDef) throw new Error(`Missing type definition for ${type}`)
+
+	const primaryKeys = typeDef.primary
+
+	// indexFields = union of sort and primary
+	const indexFields = union(sortKeys, primaryKeys)
+	const keyValues = extractKey(record, indexFields)
+
+	const dbKey = [type, indexName, ...keyValues]
+
+	if (delta === 1) db.set(dbKey, null)
+	else db.delete(dbKey)
+}
+
+function updateAggregationView(
+	db: TupleDb,
+	indexName: string,
+	def: IndexDefinition,
+	record: any,
+	delta: number
+) {
+	if (def.where && !matchWhere(record, def.where)) return
+
+	const groupKey = ["aggregation", indexName, ...extractKey(record, def.groupBy || [])]
+
+	for (const [alias, op] of Object.entries(def.aggregate!)) {
+		const val = op.kind === "count" ? 1 : record[op.field!]
+		const aggKey = [...groupKey, alias]
+
+		if (op.kind === "count") {
+			increment(db, aggKey, delta)
+		} else if (op.kind === "sum") {
+			increment(db, aggKey, (val as number) * delta)
+		} else if (op.kind === "min" || op.kind === "max") {
+			const valueKey = [...aggKey, val]
+			increment(db, valueKey, delta)
+		}
+	}
+}
+
+function updateJoinView(
+	db: TupleDb,
+	schema: Schema,
+	indexName: string,
+	joinSchema: JoinSchema,
+	record: any,
+	delta: number
+) {
+	const sides: ("left" | "right")[] = ["left", "right"]
+	for (const side of sides) {
+		const mySideDef = joinSchema[side]
+		const otherSideDef = joinSchema[side === "left" ? "right" : "left"]
+
+		if (record.type === mySideDef.type) {
+			// Find matches
+			const matches = findMatches(db, schema, otherSideDef, record[mySideDef.on])
+
+			for (const match of matches) {
+				const left = side === "left" ? record : match
+				const right = side === "right" ? record : match
+
+				const keyValues = joinSchema.key.map(({ side: s, field }) =>
+					s === "left" ? left[field] : right[field]
+				)
+
+				increment(db, ["join", indexName, ...keyValues], delta)
+			}
+		}
+	}
+}
+
+// ============================================================================
+// Read Path: Query Planner
+// ============================================================================
+
+function processQuery(db: TupleDb, schema: Schema, q: QueryQuery): { schema: Schema; result: any } {
+	// 1. Identify intent
+	if (q.aggregate) {
+		return processAggregation(db, schema, q)
+	} else if (typeof q.from === "object") {
+		return processAdHocJoin(db, schema, q.from as JoinSchema, q)
+	} else if (
+		schema.indexes[q.from as string]?.from &&
+		typeof schema.indexes[q.from as string].from !== "string"
+	) {
+		const target = q.from as string
+		if (schema.indexes[target] && typeof schema.indexes[target].from !== "string") {
+			return processJoinScan(db, schema, target, q)
+		}
+		return processStandardQuery(db, schema, target, q)
+	} else {
+		return processStandardQuery(db, schema, q.from as string, q)
+	}
+}
+
+function processStandardQuery(db: TupleDb, schema: Schema, type: string, q: QueryQuery) {
+	// 1. Find or Create Index
+	const { indexName, schema: newSchema } = ensureStandardIndex(db, schema, type, q)
+
+	// Handle Primary Scan
+	if (indexName === "primary") {
+		const typeDef = newSchema.types[type]
+		const prefixTuple = q.where ? unrollKey(q.where, typeDef.primary) : []
+		const listArgs = makeListArgs(
+			{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
+			prefixTuple.length,
+			typeDef.primary,
+			q
+		)
+		const results = db
+			.subspace([type, "primary", ...prefixTuple])
+			.list(listArgs)
+			.map(({ value }) => value)
+		return { schema: newSchema, result: results }
+	}
+
+	// Handle Secondary Index Scan
+	const def = newSchema.indexes[indexName]
+	const typeDef = newSchema.types[type]
+
+	const sortKeys = def.sort || []
+	const indexFields = union(sortKeys, typeDef.primary)
+
+	const prefixTuple = q.where ? unrollKey(q.where, indexFields) : []
+	const listArgs = makeListArgs(
+		{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
+		prefixTuple.length,
+		indexFields,
+		q
+	)
+
+	const results = db
+		.subspace([type, indexName, ...prefixTuple])
+		.list(listArgs)
+		.map(({ key }) => {
+			const fullKey = [...prefixTuple, ...key]
+
+			// Reconstruct partial object from key
+			const keyObj: any = {}
+			for (let i = 0; i < indexFields.length; i++) {
+				keyObj[indexFields[i]] = fullKey[i]
+			}
+
+			// Extract PK in correct order
+			const pk = typeDef.primary.map((f) => keyObj[f])
+
+			return db.get([type, "primary", ...pk])
+		})
+		.filter((r) => r !== undefined)
+
+	return { schema: newSchema, result: results }
+}
+
+function processAggregation(db: TupleDb, schema: Schema, q: QueryQuery) {
+	const type = q.from as string
+
+	// Find matching aggregation index
+	let indexName: string | undefined
+	for (const [name, def] of Object.entries(schema.indexes)) {
+		if (def.from === type && def.aggregate && isEqual(def.groupBy?.sort(), q.groupBy?.sort())) {
+			// Check where clause match (Strict for now)
+			if (!isEqual(def.where, q.where)) continue
+
+			// Logic: The index must have ALL the aggregates requested in `q.aggregate`.
+			let match = true
+			for (const [alias, op] of Object.entries(q.aggregate!)) {
+				if (!def.aggregate[alias] || !isEqual(def.aggregate[alias], op)) {
+					match = false
+					break
+				}
+			}
+			if (match) {
+				indexName = name
+				break
 			}
 		}
 	}
 
-	// 3. Joins
-	if (schema.joins) {
-		for (const [name, def] of Object.entries(schema.joins)) {
-			// Join logic handles type checking internally
-			update((r, d) => updateJoinIndex(db, schema, name, def, r, d))
+	let newSchema = schema
+	if (!indexName) {
+		// Create new
+		const suffix = md5(JSON.stringify({ g: q.groupBy, a: q.aggregate, w: q.where }))
+		indexName = `auto_agg_${type}_${suffix}`
+
+		const def: IndexDefinition = {
+			from: type,
+			groupBy: q.groupBy,
+			aggregate: q.aggregate,
+			where: q.where, // If we support conditional aggs
+		}
+		newSchema = cloneDeep(schema)
+		newSchema.indexes[indexName] = def
+		backfillIndex(db, newSchema, indexName)
+		saveIndex(db, indexName, def)
+	}
+
+	// Execute
+	const def = newSchema.indexes[indexName]
+	const groupKey = ["aggregation", indexName, ...extractKey(q.where || {}, def.groupBy || [])]
+
+	const result: any = {}
+	for (const [alias, op] of Object.entries(q.aggregate!)) {
+		const aggKey = [...groupKey, alias]
+		if (op.kind === "count" || op.kind === "sum") {
+			result[alias] = (db.get(aggKey) as number) || 0
+		} else {
+			const listOpts = { limit: 1, reverse: op.kind === "max" }
+			const res = db.subspace(aggKey).list(listOpts)
+			result[alias] = res.length > 0 ? res[0].key[0] : 0
 		}
 	}
+
+	return { schema: newSchema, result }
 }
 
-// ============================================================================
-// Low-Level Helpers (Scan, Keys, Math)
-// ============================================================================
-
-function backfillRecordIndex(db: TupleDb, schema: RecordDbSchema, type: string, indexName: string) {
-	const fields = schema.records[type][indexName]
-	if (!fields) return
-	const records = db
-		.subspace([type, "primary"])
-		.list()
-		.map((i) => i.value)
-	for (const r of records) {
-		updateRecordIndex(db, type, indexName, fields, r, 1)
-	}
-}
-
-function backfillAggregationIndex(db: TupleDb, schema: RecordDbSchema, name: string) {
-	const def = schema.aggregations?.[name]
-	if (!def) return
-	const records = db
-		.subspace([def.source, "primary"])
-		.list()
-		.map((i) => i.value)
-	for (const r of records) {
-		updateAggregationIndex(db, name, def, r, 1)
-	}
-}
-
-function backfillJoinIndex(db: TupleDb, schema: RecordDbSchema, name: string) {
-	const def = schema.joins?.[name]
-	if (!def) return
-
-	// For backfill, we iterate one side (Left) and find matches on the other (Right).
-	// This avoids double-counting that would occur if we used the bidirectional JoinLogic.update
-	// on every record (especially for self-joins).
-	const records = db
-		.subspace([def.left.type, "primary"])
-		.list()
-		.map((i) => i.value)
-	for (const leftRecord of records) {
-		const matches = findMatches(db, schema, def.right, leftRecord[def.left.on])
-		for (const rightRecord of matches) {
-			const keyValues = def.key.map(({ side: s, field }) =>
-				s === "left" ? leftRecord[field] : rightRecord[field]
-			)
-			increment(db, ["join", name, ...keyValues], 1)
-		}
-	}
-}
-
-// ============================================================================
-// Query Planning & Execution (The "Read" Path)
-// ============================================================================
-
-function processQuery(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	q: QueryQuery
-): { schema: RecordDbSchema; result: any } {
-	// 1. Ad-Hoc Join
-	if (typeof q.from === "object") {
-		return processAdHocJoin(db, schema, q.from as JoinSchema, q)
-	}
-
-	const target = q.from as string
-
-	// 2. Named Join
-	if (schema.joins?.[target]) {
-		return processJoinQuery(db, schema, target, q)
-	}
-
-	// 3. Aggregation
-	if (q.aggregate) {
-		return processAggregationQuery(db, schema, target, q)
-	}
-
-	// 4. Record Query
-	return processRecordQuery(db, schema, target, q)
-}
-
-// --- Query Processors ---
-
-function processAdHocJoin(db: TupleDb, schema: RecordDbSchema, joinDef: JoinSchema, q: QueryQuery) {
+function processAdHocJoin(db: TupleDb, schema: Schema, joinDef: JoinSchema, q: QueryQuery) {
+	// 1. Ensure indexes on join keys exist (Standard Indexes)
+	// We request FULL indexes (sort by ON key) so they can be reused for any value match.
 	let updatedSchema = schema
 
-	// Ensure indexes on both sides (required for efficient join updates)
-	const left = ensureIndex(db, updatedSchema, joinDef.left.type, [joinDef.left.on], [])
-	updatedSchema = left.schema
+	// Ensure Left Index (Full)
+	const { schema: s1 } = ensureStandardIndex(db, updatedSchema, joinDef.left.type, {
+		from: joinDef.left.type,
+		sort: [joinDef.left.on],
+	})
+	updatedSchema = s1
 
-	const right = ensureIndex(db, updatedSchema, joinDef.right.type, [joinDef.right.on], [])
-	updatedSchema = right.schema
+	// Ensure Right Index (Full)
+	const { schema: s2 } = ensureStandardIndex(db, updatedSchema, joinDef.right.type, {
+		from: joinDef.right.type,
+		sort: [joinDef.right.on],
+	})
+	updatedSchema = s2
 
-	// Ensure the Join View itself
+	// 2. Ensure Join Index
 	const joinName = `auto_join_${joinDef.left.type}_${joinDef.left.on}_${joinDef.right.type}_${joinDef.right.on}`
 
-	if (!updatedSchema.joins?.[joinName]) {
+	if (!updatedSchema.indexes[joinName]) {
 		const newSchema = cloneDeep(updatedSchema)
-		newSchema.joins = newSchema.joins || {}
-		newSchema.joins[joinName] = joinDef
-		backfillJoinIndex(db, newSchema, joinName)
-		saveSchema(db, newSchema)
+		const def: IndexDefinition = {
+			from: joinDef,
+		}
+		newSchema.indexes[joinName] = def
+		backfillIndex(db, newSchema, joinName)
+		saveIndex(db, joinName, def)
 		updatedSchema = newSchema
 	}
 
-	return processJoinQuery(db, updatedSchema, joinName, q)
+	return processJoinScan(db, updatedSchema, joinName, q)
 }
 
-function processJoinQuery(db: TupleDb, schema: RecordDbSchema, joinName: string, q: QueryQuery) {
-	const def = schema.joins![joinName]
-	const keyFields = def.key.map((k) => k.field)
+function processJoinScan(db: TupleDb, schema: Schema, joinName: string, q: QueryQuery) {
+	const def = schema.indexes[joinName]
+	const joinDef = def.from as JoinSchema
+	const keyFields = joinDef.key.map((k) => k.field)
 
-	// Prepare scan args
 	const prefixTuple = q.where ? unrollKey(q.where, keyFields) : []
 	const listArgs = makeListArgs(
 		{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where }, // mixing args for simplicity
@@ -321,84 +429,86 @@ function processJoinQuery(db: TupleDb, schema: RecordDbSchema, joinName: string,
 	return { schema, result: results }
 }
 
-function processAggregationQuery(db: TupleDb, schema: RecordDbSchema, type: string, q: QueryQuery) {
-	let updatedSchema = schema
+// ============================================================================
+// Helpers
+// ============================================================================
 
-	// Ensure all requested aggregations exist
-	for (const [alias, kind] of Object.entries(q.aggregate!)) {
-		const groupBy = q.groupBy ? q.groupBy.sort() : []
-
-		// Find existing
-		let existing = false
-		if (updatedSchema.aggregations) {
-			for (const [_, def] of Object.entries(updatedSchema.aggregations)) {
-				if (def.source === type && def.kind === kind && isEqual(def.groupBy.sort(), groupBy)) {
-					existing = true
-					break
-				}
-			}
-		}
-
-		if (!existing) {
-			const aggName = `auto_agg_${type}_${kind}_${groupBy.join("_")}`
-
-			const newSchema = cloneDeep(updatedSchema)
-			newSchema.aggregations = newSchema.aggregations || {}
-			newSchema.aggregations[aggName] = { source: type, groupBy, kind, field: undefined }
-			backfillAggregationIndex(db, newSchema, aggName)
-			saveSchema(db, newSchema)
-			updatedSchema = newSchema
-		}
-	}
-
-	// Execute
-	const result: any = {}
-	for (const [alias, kind] of Object.entries(q.aggregate!)) {
-		const groupBy = q.groupBy ? q.groupBy.sort() : []
-		let name: string | undefined
-		for (const [n, def] of Object.entries(updatedSchema.aggregations!)) {
-			if (def.source === type && def.kind === kind && isEqual(def.groupBy.sort(), groupBy)) {
-				name = n
-				break
-			}
-		}
-
-		const aggDef = updatedSchema.aggregations![name!]
-		const groupKey = ["aggregation", name, ...extractKey(q.where || {}, aggDef.groupBy)]
-
-		if (aggDef.kind === "count" || aggDef.kind === "sum") {
-			result[alias] = (db.get(groupKey) as number) || 0
-		} else {
-			// Min/Max stored as keys in subspace
-			const listOpts = { limit: 1, reverse: aggDef.kind === "max" }
-			const res = db.subspace(groupKey).list(listOpts)
-			result[alias] = res.length > 0 ? res[0].key[0] : 0
-		}
-	}
-
-	return { schema: updatedSchema, result }
-}
-
-function processRecordQuery(db: TupleDb, schema: RecordDbSchema, type: string, q: QueryQuery) {
+function ensureStandardIndex(
+	db: TupleDb,
+	schema: Schema,
+	type: string,
+	q: QueryQuery
+): { schema: Schema; indexName: string } {
 	const whereKeys = q.where ? Object.keys(q.where).sort() : []
 	const sortKeys = q.sort || []
 
-	// 1. Ensure an index exists for this specific query pattern
-	const res = ensureIndex(db, schema, type, whereKeys, sortKeys)
-	const indexName = res.indexName
+	const primary = schema.types[type].primary
+	if (matchIndex(primary, whereKeys, sortKeys)) return { schema, indexName: "primary" }
 
-	// 2. Scan
-	// We can assert indexName is defined because ensureIndex now always returns 'primary' or a named index.
-	const results = scanIndex(db, res.schema, type, indexName!, {
-		eq: q.where,
-		limit: q.limit,
-		reverse: q.reverse,
-	})
+	// Verify existing indexes
+	for (const [name, def] of Object.entries(schema.indexes)) {
+		if (def.from === type && !def.aggregate && typeof def.from === "string") {
+			const indexFields = union(def.sort || [], primary)
+			if (matchIndex(indexFields, whereKeys, sortKeys)) {
+				// Allow reuse if def.where is undefined (full index)
+				if (def.where && !isEqual(def.where, q.where)) continue
+				return { schema, indexName: name }
+			}
+		}
+	}
 
-	return { schema: res.schema, result: results }
+	// Create new
+	const needed = union(whereKeys, sortKeys)
+	const suffix = md5(JSON.stringify({ s: needed, w: q.where }))
+	const indexName = `auto_idx_${type}_${suffix}`
+
+	const newSchema = cloneDeep(schema)
+	const def: IndexDefinition = {
+		from: type,
+		sort: needed,
+		where: q.where, // Persist where clause
+	}
+	newSchema.indexes[indexName] = def
+	backfillIndex(db, newSchema, indexName)
+	saveIndex(db, indexName, def)
+
+	return { schema: newSchema, indexName }
 }
 
-// --- Specific Ensure Logic ---
+function backfillIndex(db: TupleDb, schema: Schema, indexName: string) {
+	const def = schema.indexes[indexName]
+
+	if (typeof def.from !== "string") {
+		// Backfill Join
+		const joinDef = def.from as JoinSchema
+		const records = db
+			.subspace([joinDef.left.type, "primary"])
+			.list()
+			.map((i) => i.value)
+		for (const leftRecord of records) {
+			const matches = findMatches(db, schema, joinDef.right, leftRecord[joinDef.left.on])
+			for (const rightRecord of matches) {
+				const keyValues = joinDef.key.map(({ side: s, field }) =>
+					s === "left" ? leftRecord[field] : rightRecord[field]
+				)
+				increment(db, ["join", indexName, ...keyValues], 1)
+			}
+		}
+	} else {
+		const type = def.from
+		const records = db
+			.subspace([type, "primary"])
+			.list()
+			.map((i) => i.value)
+		for (const r of records) {
+			if (def.aggregate) {
+				updateAggregationView(db, indexName, def, r, 1)
+			} else {
+				updateStandardViewWithSchema(db, schema, type, indexName, def, r, 1)
+			}
+		}
+	}
+}
 
 function matchIndex(fields: string[], whereKeys: string[], sortKeys: string[]) {
 	if (fields.length < whereKeys.length + sortKeys.length) return false
@@ -418,88 +528,8 @@ function matchIndex(fields: string[], whereKeys: string[], sortKeys: string[]) {
 	return true
 }
 
-function ensureIndex(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	type: string,
-	whereKeys: string[],
-	sortKeys: string[] = []
-): { schema: RecordDbSchema; indexName: string } {
-	const primary = schema.records[type].primary
-
-	if (matchIndex(primary, whereKeys, sortKeys)) return { schema, indexName: "primary" }
-
-	// Check existing
-	for (const [name, fields] of Object.entries(schema.records[type])) {
-		if (name === "primary") continue
-		if (matchIndex(fields, whereKeys, sortKeys)) return { schema, indexName: name }
-	}
-
-	// Create New
-	const needed = union(whereKeys, sortKeys, primary)
-	const indexName = `auto_idx_${needed.join("_")}`
-
-	const newSchema = cloneDeep(schema)
-	newSchema.records[type][indexName] = needed
-	backfillRecordIndex(db, newSchema, type, indexName)
-	saveSchema(db, newSchema)
-
-	return { schema: newSchema, indexName }
-}
-
-// ============================================================================
-// Low-Level Helpers (Scan, Keys, Math)
-// ============================================================================
-
-function scanIndex(
-	db: TupleDb,
-	schema: RecordDbSchema,
-	type: string,
-	indexName: string,
-	args: ScanArgs
-): any[] {
-	const fields = schema.records[type][indexName]
-	const primary = schema.records[type].primary
-
-	// Map index fields to primary key positions
-	const pkMap = primary.map((p) => {
-		const idx = fields.indexOf(p)
-		if (idx === -1) throw new Error(`Index ${indexName} missing PK field ${p}`)
-		return idx
-	})
-
-	const prefixTuple = args.eq ? unrollKey(args.eq, fields) : []
-	const listArgs = makeListArgs(args, prefixTuple.length, fields, args)
-
-	return db
-		.subspace([type, indexName, ...prefixTuple])
-		.list(listArgs)
-		.map(({ key }) => {
-			const fullKey = [...prefixTuple, ...key]
-			const pk = pkMap.map((idx) => fullKey[idx])
-			return db.get([type, "primary", ...pk])
-		})
-}
-
-function makeListArgs(
-	args: ScanArgs & { limit?: number; reverse?: boolean },
-	prefixLen: number,
-	allFields: string[],
-	orig: any
-): ListArgs<Tuple> {
-	const remaining = allFields.slice(prefixLen)
-	return compactObj({
-		limit: args.limit,
-		reverse: args.reverse,
-		gt: orig.gt ? unrollKey(orig.gt, remaining) : undefined,
-		gte: orig.gte ? unrollKey(orig.gte, remaining) : undefined,
-		lt: orig.lt ? unrollKey(orig.lt, remaining) : undefined,
-		lte: orig.lte ? unrollKey(orig.lte, remaining) : undefined,
-	})
-}
-
-function findMatches(db: TupleDb, schema: RecordDbSchema, sideDef: JoinSide, val: any): any[] {
-	// Re-uses query logic to ensure indexes exist for the join
+function findMatches(db: TupleDb, schema: Schema, sideDef: JoinSide, val: any): any[] {
+	// Re-uses query logic
 	const { result } = processQuery(db, schema, {
 		from: sideDef.type,
 		where: { [sideDef.on]: val },
@@ -531,56 +561,71 @@ function unrollKey(obj: any, fields: string[]): Tuple {
 	return res
 }
 
-function loadSchema(db: TupleDb): RecordDbSchema | null {
-	return db.get(["_schema", "current"]) as RecordDbSchema
+function matchWhere(record: any, where: Record<string, any>): boolean {
+	for (const [k, v] of Object.entries(where)) {
+		if (record[k] !== v) return false
+	}
+	return true
 }
 
-function saveSchema(db: TupleDb, s: RecordDbSchema) {
-	db.set(["_schema", "current"], s)
+function makeListArgs(
+	args: any,
+	prefixLen: number,
+	allFields: string[],
+	orig: any
+): ListArgs<Tuple> {
+	const remaining = allFields.slice(prefixLen)
+	return compactObj({
+		limit: args.limit,
+		reverse: args.reverse,
+		gt: orig.gt ? unrollKey(orig.gt, remaining) : undefined,
+		gte: orig.gte ? unrollKey(orig.gte, remaining) : undefined,
+		lt: orig.lt ? unrollKey(orig.lt, remaining) : undefined,
+		lte: orig.lte ? unrollKey(orig.lte, remaining) : undefined,
+	})
 }
 
 // ============================================================================
 // RecordDb Factory
 // ============================================================================
 
-export function recordDb(db: TupleDb, initialSchema: RecordDbSchema): RecordDb {
-	let cachedSchema = loadSchema(db) || initialSchema
-	if (!loadSchema(db)) saveSchema(db, initialSchema)
+export function recordDb(db: TupleDb, initialSchema: Schema): RecordDb {
+	ensureSchema(db, initialSchema)
 
-	const reload = () => {
-		cachedSchema = loadSchema(db) || initialSchema
-	}
+	// Helper to get fresh schema on every call
+	const getSchema = () => loadSchema(db)
 
 	return {
 		get: (args) => {
-			reload()
-			const schema = cachedSchema
-			const pk = extractKey(args, schema.records[args.type].primary)
+			const schema = getSchema()
+			// We need primary key def
+			const typeDef = schema.types[args.type]
+			const pk = extractKey(args, typeDef.primary)
 			return db.get([args.type, "primary", ...pk])
 		},
 		delete: (args) => {
-			reload()
-			const schema = cachedSchema
-			const pk = extractKey(args, schema.records[args.type].primary)
+			const schema = getSchema()
+			const typeDef = schema.types[args.type]
+			const pk = extractKey(args, typeDef.primary)
 			const oldRecord = db.get([args.type, "primary", ...pk])
 			if (!oldRecord) return
 
 			db.delete([args.type, "primary", ...pk])
-			updateIndexes(db, schema, { type: args.type, oldRecord, newRecord: null })
+			updateMaterializedViews(db, schema, { type: args.type, oldRecord, newRecord: null })
 		},
 		set: (record) => {
-			reload()
-			const schema = cachedSchema
+			const schema = getSchema()
 			const { type } = record
-			const pk = extractKey(record, schema.records[type].primary)
+			const typeDef = schema.types[type]
+			const pk = extractKey(record, typeDef.primary)
 			const oldRecord = db.get([type, "primary", ...pk])
 
 			db.set([type, "primary", ...pk], record)
-			updateIndexes(db, schema, { type, oldRecord, newRecord: record })
+			updateMaterializedViews(db, schema, { type, oldRecord, newRecord: record })
 		},
 		query: (q) => {
-			reload()
-			const { result } = processQuery(db, cachedSchema, q)
+			const schema = getSchema()
+			const { result } = processQuery(db, schema, q)
 			return result
 		},
 	}

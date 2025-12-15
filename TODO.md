@@ -13,8 +13,16 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
+refactor -> ivm-refactor.md
 
-s
+
+- generalize ideas...
+	- indexing indexes and querying for indexes.
+	- where {type } instead of from: type.
+	-
+
+---
+
 
 I want a way to query based on best indexes and a way to query based on ensuring an index.
 
@@ -58,6 +66,13 @@ const joinDef: JoinSchema = {
 ---
 
 Can you think of some examples of a three-way join? I'm imagining a discovery feed where you see posts not by people you follow but only my people who you follow follow. There might be a tricky piece here where we're excluding from the results. Not sure how to implement this.
+
+
+---
+
+How to handle indexing properties that should fanout like lists of tags, etc. And what about nested values, using dot-paths.
+
+
 
 ---
 

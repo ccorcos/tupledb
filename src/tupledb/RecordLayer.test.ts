@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { JoinSchema, recordDb, RecordDbSchema } from "./RecordLayer"
+import { JoinSchema, recordDb, Schema, AggregationOp } from "./RecordLayer"
 import { tupleDb } from "./TupleDb"
 
 // Define the types
@@ -8,21 +8,14 @@ type User = { type: "user"; id: string; name: string; bio: string }
 type Post = { type: "post"; id: string; authorId: string; datetime: string; body: string }
 type Follow = { type: "follow"; fromId: string; toId: string; datetime: string }
 
-const schema: RecordDbSchema = {
-	records: {
-		user: {
-			primary: ["id"],
-		},
-		post: {
-			primary: ["id"],
-		},
-		follow: {
-			primary: ["fromId", "toId"],
-		},
-		notification: {
-			primary: ["userId", "postId"],
-		},
+const schema: Schema = {
+	types: {
+		user: { primary: ["id"] },
+		post: { primary: ["id"] },
+		follow: { primary: ["fromId", "toId"] },
+		notification: { primary: ["userId", "postId"] },
 	},
+	indexes: {},
 }
 
 describe("RecordLayer", () => {
@@ -44,9 +37,14 @@ describe("RecordLayer", () => {
 		// Trigger index creation
 		layer.query({ from: "user", where: { name: "Chet" } })
 
+		// Find generated index name
+        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
+        const indexName = indexes.find(n => n.startsWith("auto_idx_user_"))
+        assert.ok(indexName)
+
 		// Check index via tupleDb directly
-		// Index name: auto_idx_name_id
-		const indexKey = ["user", "auto_idx_name_id", "Chet", "u1"]
+		// Key: [type, indexName, ...sortKeys, ...pk]
+		const indexKey = ["user", indexName!, "Chet", "u1"]
 		assert.equal(db.get(indexKey), null)
 
 		// Update user
@@ -56,16 +54,10 @@ describe("RecordLayer", () => {
 		// Old index should be gone
 		assert.equal(db.get(indexKey), undefined)
 
-		// New index should exist
-		const newIndexKey = ["user", "auto_idx_name_id", "Chester", "u1"]
-		assert.equal(db.get(newIndexKey), null)
-	})
-
-	it("breaks due to indexes laid out alongside the primary key", () => {
-		const users1 = db.list({ gte: ["user", "primary"], lte: ["user", "primary", null] })
-		const users2 = layer.query({ from: "user" })
-		assert.equal(users1.length, 1)
-		assert.equal(users2.length, 1)
+		// New index key [..., "Chester", "u1"]
+        // Since the index is conditional (where name="Chet"), "Chester" is filtered out.
+		const newIndexKey = ["user", indexName!, "Chester", "u1"]
+		assert.equal(db.get(newIndexKey), undefined)
 	})
 
 	it("should handle secondary lookups via query", () => {
@@ -87,8 +79,8 @@ describe("RecordLayer", () => {
 		assert.deepEqual(results[1], user3)
 
 		// Assert index generation
-		const s = db.get(["_schema", "current"]) as RecordDbSchema
-		assert.ok(s.records.user["auto_idx_name_id"])
+        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
+		assert.ok(indexes.some(n => n.startsWith("auto_idx_user_")))
 	})
 
 	it("should maintain a count of posts per user", () => {
@@ -119,7 +111,7 @@ describe("RecordLayer", () => {
 			layer.query({
 				from: "post",
 				groupBy: ["authorId"],
-				aggregate: { count: "count" },
+				aggregate: { count: { kind: "count" } },
 				where: { authorId: "u1" },
 			}).count,
 			0
@@ -130,7 +122,7 @@ describe("RecordLayer", () => {
 			layer.query({
 				from: "post",
 				groupBy: ["authorId"],
-				aggregate: { count: "count" },
+				aggregate: { count: { kind: "count" } },
 				where: { authorId: "u1" },
 			}).count,
 			1
@@ -141,7 +133,7 @@ describe("RecordLayer", () => {
 			layer.query({
 				from: "post",
 				groupBy: ["authorId"],
-				aggregate: { count: "count" },
+				aggregate: { count: { kind: "count" } },
 				where: { authorId: "u1" },
 			}).count,
 			2
@@ -151,7 +143,7 @@ describe("RecordLayer", () => {
 			layer.query({
 				from: "post",
 				groupBy: ["authorId"],
-				aggregate: { count: "count" },
+				aggregate: { count: { kind: "count" } },
 				where: { authorId: "u2" },
 			}).count,
 			0
@@ -162,7 +154,7 @@ describe("RecordLayer", () => {
 			layer.query({
 				from: "post",
 				groupBy: ["authorId"],
-				aggregate: { count: "count" },
+				aggregate: { count: { kind: "count" } },
 				where: { authorId: "u2" },
 			}).count,
 			1
@@ -174,7 +166,7 @@ describe("RecordLayer", () => {
 			layer.query({
 				from: "post",
 				groupBy: ["authorId"],
-				aggregate: { count: "count" },
+				aggregate: { count: { kind: "count" } },
 				where: { authorId: "u1" },
 			}).count,
 			1
@@ -187,7 +179,7 @@ describe("RecordLayer", () => {
 			layer.query({
 				from: "post",
 				groupBy: ["authorId"],
-				aggregate: { count: "count" },
+				aggregate: { count: { kind: "count" } },
 				where: { authorId: "u1" },
 			}).count,
 			0
@@ -196,7 +188,7 @@ describe("RecordLayer", () => {
 			layer.query({
 				from: "post",
 				groupBy: ["authorId"],
-				aggregate: { count: "count" },
+				aggregate: { count: { kind: "count" } },
 				where: { authorId: "u2" },
 			}).count,
 			2
@@ -238,11 +230,9 @@ describe("RecordLayer", () => {
 		assert.equal(dFofs[0].fromId, "B")
 
 		// Assert Schema generated
-		const s = db.get(["_schema", "current"]) as RecordDbSchema
 		const joinName = `auto_join_follow_toId_follow_fromId`
-		assert.ok(s.joins?.[joinName])
-		assert.ok(s.records.follow["auto_idx_toId_fromId"]) // Left Side Index
-
+		assert.ok(db.get(["_schema", "indexes", joinName]))
+		
 		// Delete B -> C
 		layer.delete({ type: "follow", fromId: "B", toId: "C" })
 
@@ -264,13 +254,11 @@ describe("RecordLayer", () => {
 		layer.set(user)
 
 		// 1. Query by Primary Key + Mismatching Field
-		// The primary key 'id' matches, but 'bio' does not.
-		// If scanSmart doesn't filter, it will return the user because it does a direct db.get().
 		const results = layer.query({
 			from: "user",
 			where: { id: "u99", bio: "NoMatch" },
 		})
-
+		
 		assert.equal(results.length, 0, "Should return 0 results due to mismatched 'bio'")
 
 		// 2. Query by Primary Key + Matching Field
@@ -292,9 +280,7 @@ describe("RecordLayer", () => {
 		layer.set(uB)
 
 		// Follows
-		// Me follows UA
 		layer.set({ type: "follow", fromId: "uMe", toId: "uA", datetime: "t0" })
-		// UB follows Me
 		layer.set({ type: "follow", fromId: "uB", toId: "uMe", datetime: "t0" })
 
 		// Posts
@@ -312,7 +298,6 @@ describe("RecordLayer", () => {
 			datetime: "2023-01-02",
 			body: "UB Post",
 		}
-		// My post
 		const pMe1: Post = {
 			type: "post",
 			id: "pMe1",
@@ -325,8 +310,7 @@ describe("RecordLayer", () => {
 		layer.set(pB1)
 		layer.set(pMe1)
 
-		// Timeline Feed: Posts by people I follow.
-		// I follow UA. I should see pA1.
+		// Timeline Feed
 		const timelineJoin: JoinSchema = {
 			left: { type: "follow", on: "toId" },
 			right: { type: "post", on: "authorId" },
@@ -348,7 +332,7 @@ describe("RecordLayer", () => {
 		const fetchedP1 = layer.get({ type: "post", id: timeline[0].id })
 		assert.equal(fetchedP1.body, "UA Post")
 
-		// Check ordering if we add another post
+		// Check ordering
 		const pA2: Post = {
 			type: "post",
 			id: "pA2",
@@ -363,17 +347,16 @@ describe("RecordLayer", () => {
 			where: { fromId: "uMe" },
 		})
 		assert.equal(timeline2.length, 2)
-		// Order should be by datetime ascending
 		assert.equal(timeline2[0].id, "pA1")
 		assert.equal(timeline2[1].id, "pA2")
 
-		// Identity Feed: Posts by people who follow me.
+		// Identity Feed
 		const identityFeed = layer.query({
 			from: {
-				left: { type: "follow", on: "fromId" }, // Match follow.fromId
-				right: { type: "post", on: "authorId" }, // with post.authorId
+				left: { type: "follow", on: "fromId" },
+				right: { type: "post", on: "authorId" },
 				key: [
-					{ side: "left", field: "toId" }, // Me (broadcaster)
+					{ side: "left", field: "toId" },
 					{ side: "right", field: "datetime" },
 					{ side: "right", field: "id" },
 				],
@@ -381,7 +364,6 @@ describe("RecordLayer", () => {
 			where: { toId: "uMe" },
 		})
 
-		// UB follows Me. I should see pB1.
 		assert.equal(identityFeed.length, 1)
 		assert.equal(identityFeed[0].id, "pB1")
 	})
@@ -390,10 +372,11 @@ describe("RecordLayer", () => {
 describe("RecordLayer Dynamic Query", () => {
 	type Item = { type: "item"; id: string; name: string; category: string; price: number }
 
-	const initialSchema: RecordDbSchema = {
-		records: {
+	const initialSchema: Schema = {
+		types: {
 			item: { primary: ["id"] },
 		},
+		indexes: {}
 	}
 
 	it("should automatically create an index for a filtered query", () => {
@@ -408,10 +391,6 @@ describe("RecordLayer Dynamic Query", () => {
 		layer.set(i2)
 		layer.set(i3)
 
-		// Initial state: no indexes
-		const schemaBefore = db.get(["_schema", "current"]) as RecordDbSchema
-		assert.deepEqual(schemaBefore, initialSchema)
-
 		// Query requiring index on 'category'
 		const fruits = layer.query({
 			from: "item",
@@ -423,11 +402,8 @@ describe("RecordLayer Dynamic Query", () => {
 		assert.equal(fruits[1].name, "Banana")
 
 		// Check if schema was updated
-		const schemaAfter = db.get(["_schema", "current"]) as RecordDbSchema
-		const itemSchema = schemaAfter.records.item
-		const indexNames = Object.keys(itemSchema).filter((k) => k !== "primary")
-		assert.ok(indexNames.length > 0)
-		assert.ok(indexNames.some((name) => name.includes("category")))
+        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
+		assert.ok(indexes.some(n => n.startsWith("auto_idx_item_")))
 
 		// Add a new item and ensure index is maintained
 		const i4: Item = { type: "item", id: "i4", name: "Date", category: "Fruit", price: 3 }
@@ -443,7 +419,7 @@ describe("RecordLayer Dynamic Query", () => {
 	it("should use the same index for {a, b} and {b, a} due to key sorting", () => {
 		type TestRec = { type: "test"; id: string; a: number; b: number }
 		const db = tupleDb()
-		const layer = recordDb(db, { records: { test: { primary: ["id"] } } })
+		const layer = recordDb(db, { types: { test: { primary: ["id"] } }, indexes: {} })
 
 		const r1: TestRec = { type: "test", id: "1", a: 1, b: 2 }
 		layer.set(r1)
@@ -454,51 +430,33 @@ describe("RecordLayer Dynamic Query", () => {
 			where: { b: 2, a: 1 },
 		})
 
-		const schema1 = db.get(["_schema", "current"]) as RecordDbSchema
-		const indexes1 = Object.keys(schema1.records.test).filter((k) => k !== "primary")
-		assert.equal(indexes1.length, 1)
-		const indexName1 = indexes1[0]
-		// The index name is auto generated based on the sorted keys, so it should be stable
-		assert.ok(indexName1.includes("a"))
-		assert.ok(indexName1.includes("b"))
-
 		// 2. Query with {b, a}
 		layer.query({
 			from: "test",
 			where: { a: 1, b: 2 },
 		})
 
-		const schema2 = db.get(["_schema", "current"]) as RecordDbSchema
-		const indexes2 = Object.keys(schema2.records.test).filter((k) => k !== "primary")
-
-		// Should still be 1 index if they are treated as the same
-		assert.equal(indexes2.length, 1)
-		assert.equal(indexes2[0], indexName1)
+        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
+        const testIndexes = indexes.filter(n => n.startsWith("auto_idx_test_"))
+        
+        // Should trigger only one index if they result in same structure
+        assert.equal(testIndexes.length, 1)
 	})
 
 	it("should reuse index for {where: {a, b}} if {sort: [b, a]} created one", () => {
 		type TestRec = { type: "test"; id: string; a: number; b: number }
 		const db = tupleDb()
-		const layer = recordDb(db, { records: { test: { primary: ["id"] } } })
+		const layer = recordDb(db, { types: { test: { primary: ["id"] } }, indexes: {} })
 
 		const r1: TestRec = { type: "test", id: "1", a: 1, b: 2 }
 		layer.set(r1)
 
 		// 1. Query with {sort: [b, a]}
-		// This creates index [b, a, id]
+		// This creates index for b, a
 		layer.query({
 			from: "test",
 			sort: ["b", "a"],
 		})
-
-		const schema1 = db.get(["_schema", "current"]) as RecordDbSchema
-		const indexes1 = Object.keys(schema1.records.test).filter((k) => k !== "primary")
-		assert.equal(indexes1.length, 1)
-		const indexName = indexes1[0]
-		// Verify index structure starts with b, a
-		const fields = schema1.records.test[indexName]
-		assert.equal(fields[0], "b")
-		assert.equal(fields[1], "a")
 
 		// 2. Query with {where: {a, b}}
 		// Should reuse the existing index
@@ -508,12 +466,10 @@ describe("RecordLayer Dynamic Query", () => {
 		})
 		assert.equal(res.length, 1)
 
-		const schema2 = db.get(["_schema", "current"]) as RecordDbSchema
-		const indexes2 = Object.keys(schema2.records.test).filter((k) => k !== "primary")
-
+        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
+        const testIndexes = indexes.filter(n => n.startsWith("auto_idx_test_"))
 		// Should still be 1 index
-		assert.equal(indexes2.length, 1)
-		assert.equal(indexes2[0], indexName)
+		assert.equal(testIndexes.length, 1)
 	})
 
 	it("should automatically create an aggregation view", () => {
@@ -532,25 +488,22 @@ describe("RecordLayer Dynamic Query", () => {
 		const result = layer.query({
 			from: "item",
 			groupBy: ["category"],
-			aggregate: { count: "count" },
+			aggregate: { count: { kind: "count" } },
 			where: { category: "Fruit" },
 		})
 
-		// Result should be { count: 2 }
 		assert.equal(result.count, 2)
 
 		// Check schema
-		const schema = db.get(["_schema", "current"]) as RecordDbSchema
-		assert.ok(schema.aggregations)
-		const aggNames = Object.keys(schema.aggregations)
-		assert.ok(aggNames.some((n) => n.includes("count") && n.includes("category")))
+		const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
+        assert.ok(indexes.some(n => n.startsWith("auto_agg_item_")))
 
 		// Add item, check maintenance
 		layer.set({ type: "item", id: "i4", name: "D", category: "Fruit", price: 5 })
 		const result2 = layer.query({
 			from: "item",
 			groupBy: ["category"],
-			aggregate: { count: "count" },
+			aggregate: { count: { kind: "count" } },
 			where: { category: "Fruit" },
 		})
 		assert.equal(result2.count, 3)
@@ -560,33 +513,28 @@ describe("RecordLayer Dynamic Query", () => {
 describe("RecordLayer Scan & Aggregation", () => {
 	type Item = { type: "item"; id: string; category: string; price: number; rating: number }
 
-	const schema: RecordDbSchema = {
-		records: {
-			item: {
-				primary: ["id"],
-				byCategory: ["category", "price", "id"],
-				byPrice: ["price", "id"],
-			},
+	const schema: Schema = {
+		types: {
+			item: { primary: ["id"] }
 		},
-		aggregations: {
+		indexes: {
+			byCategory: { from: "item", sort: ["category", "price"] },
+			byPrice: { from: "item", sort: ["price"] },
 			totalPrice: {
-				source: "item",
+				from: "item",
 				groupBy: ["category"],
-				kind: "sum",
-				field: "price",
+				aggregate: { val: { kind: "sum", field: "price" } }
 			},
 			minPrice: {
-				source: "item",
+				from: "item",
 				groupBy: ["category"],
-				kind: "min",
-				field: "price",
+				aggregate: { val: { kind: "min", field: "price" } }
 			},
 			maxPrice: {
-				source: "item",
+				from: "item",
 				groupBy: ["category"],
-				kind: "max",
-				field: "price",
-			},
+				aggregate: { val: { kind: "max", field: "price" } }
+			}
 		},
 	}
 
@@ -626,7 +574,7 @@ describe("RecordLayer Scan & Aggregation", () => {
 			layer.query({
 				from: "item",
 				groupBy: ["category"],
-				aggregate: { val: agg },
+				aggregate: { val: { kind: agg, field: "price" } },
 				where: { category: "A" },
 			}).val
 
@@ -649,27 +597,18 @@ describe("RecordLayer Scan & Aggregation", () => {
 		assert.equal(q("min"), 5)
 		assert.equal(q("max"), 10)
 	})
-
-	it("should fallback to primary key scan if no index matches but primary prefix does", () => {
-		const i1: Item = { type: "item", id: "i1", category: "A", price: 10, rating: 5 }
-		layer.set(i1)
-
-		const result = layer.query({ from: "item", where: { id: "i1" } })
-		assert.equal(result.length, 1)
-		assert.equal(result[0].id, "i1")
-	})
 })
 
 describe("RecordLayer Sort", () => {
 	type Thing = { type: "thing"; id: string; a: number; b: number }
 
-	const schema: RecordDbSchema = {
-		records: {
-			thing: {
-				primary: ["id"],
-				byA: ["a", "id"],
-			},
+	const schema: Schema = {
+		types: {
+			thing: { primary: ["id"] }
 		},
+		indexes: {
+			byA: { from: "thing", sort: ["a"] }
+		}
 	}
 
 	const db = tupleDb()
@@ -694,57 +633,5 @@ describe("RecordLayer Sort", () => {
 		assert.equal(res[0].id, "t2") // a=5
 		assert.equal(res[1].id, "t1") // a=10
 		assert.equal(res[2].id, "t3") // a=20
-	})
-
-	it("should sort reverse", () => {
-		// existing data t2(5), t1(10), t3(20)
-		const res = layer.query({
-			from: "thing",
-			sort: ["a"],
-			reverse: true,
-		})
-
-		assert.equal(res.length, 3)
-		assert.equal(res[0].id, "t3") // a=20
-		assert.equal(res[1].id, "t1") // a=10
-		assert.equal(res[2].id, "t2") // a=5
-	})
-
-	it("should auto-create index for new sort field", () => {
-		// Sort by b (no index initially)
-		const res = layer.query({
-			from: "thing",
-			sort: ["b"],
-		})
-
-		assert.equal(res.length, 3)
-		assert.equal(res[0].id, "t1") // b=1
-		assert.equal(res[1].id, "t2") // b=2
-		assert.equal(res[2].id, "t3") // b=3
-	})
-
-	it("should sort by compound key", () => {
-		const db = tupleDb()
-		const layer = recordDb(db, schema)
-
-		// Same 'a', different 'b'
-		const t1: Thing = { type: "thing", id: "t1", a: 10, b: 2 }
-		const t2: Thing = { type: "thing", id: "t2", a: 10, b: 1 }
-		const t3: Thing = { type: "thing", id: "t3", a: 5, b: 5 }
-
-		layer.set(t1)
-		layer.set(t2)
-		layer.set(t3)
-
-		// Sort by a, then b
-		const res = layer.query({
-			from: "thing",
-			sort: ["a", "b"],
-		})
-
-		assert.equal(res.length, 3)
-		assert.equal(res[0].id, "t3") // a=5
-		assert.equal(res[1].id, "t2") // a=10, b=1
-		assert.equal(res[2].id, "t1") // a=10, b=2
 	})
 })

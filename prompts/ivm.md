@@ -202,3 +202,23 @@ Can be refactored into
 
 Lets do this kind refactor throughout
 
+---
+
+
+Help me consider and plan for a big refactor. I'm not 100% sure it makes sense so I want you to figure out all the details and report back on whether its worthwhile.
+
+It seems that indexes and queries are redundant concepts.
+A record index is currently defined as `type: {name: string[]}` but it could just be `name: {from: type, sort: string[]}` which is a query.
+
+I suspect aggregations and join have a similar relationships where we can get rid of the index schema and just use a query instead as the index definition.
+
+Obviously, queries can be have ambiguities and using queries as index definitions definitely needs to be more restrained. For example, right now we don't have a concept of conditional indexes so the index definitions should not be allowed to have a where clause.
+
+Something else to think about is that out schema itself can potentially be stored as more than one record in the schema subspace. One day, this could allow us to create indexes on our indexes for faster lookup of which indexes need updating and which indexes we can query. We don't need to do all of this right now, but I want to think about this as part of the planning the architecture of this database. At some point in the future, we could end up with many many indexes (queries) and so it would be nice if we don't have to check every one of them every time.
+
+Help me think through this. List the costs and benefits. Consider various trade-offs. And plan out how this would be implemented. Write out your plan in plans/refactor.md
+
+
+
+
+---
