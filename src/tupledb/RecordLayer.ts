@@ -110,7 +110,7 @@ function ensureSchema(db: TupleDb, initialSchema: Schema) {
 // Write Path: View Maintenance
 // ============================================================================
 
-function updateMaterializedViews(db: TupleDb, schema: Schema, change: Change) {
+function updateIndexes(db: TupleDb, schema: Schema, change: Change) {
 	const { type, oldRecord, newRecord } = change
 
 	const update = (fn: (r: any, d: number) => void) => {
@@ -119,24 +119,22 @@ function updateMaterializedViews(db: TupleDb, schema: Schema, change: Change) {
 	}
 
 	for (const [indexName, def] of Object.entries(schema.indexes)) {
-		// 1. Join View
 		if (typeof def.from !== "string") {
-			update((r, d) => updateJoinView(db, schema, indexName, def.from as JoinSchema, r, d))
+			update((r, d) => updateJoinIndex(db, schema, indexName, def.from as JoinSchema, r, d))
 			continue
 		}
 
-		// 2. Standard / Aggregation View (Single Source)
 		if (def.from === type) {
 			if (def.aggregate) {
-				update((r, d) => updateAggregationView(db, indexName, def, r, d))
+				update((r, d) => updateAggregationIndex(db, indexName, def, r, d))
 			} else {
-				update((r, d) => updateStandardViewWithSchema(db, schema, type, indexName, def, r, d))
+				update((r, d) => updateRecordIndex(db, schema, type, indexName, def, r, d))
 			}
 		}
 	}
 }
 
-function updateStandardViewWithSchema(
+function updateRecordIndex(
 	db: TupleDb,
 	schema: Schema,
 	type: string,
@@ -165,7 +163,7 @@ function updateStandardViewWithSchema(
 	else db.delete(dbKey)
 }
 
-function updateAggregationView(
+function updateAggregationIndex(
 	db: TupleDb,
 	indexName: string,
 	def: IndexDefinition,
@@ -191,7 +189,7 @@ function updateAggregationView(
 	}
 }
 
-function updateJoinView(
+function updateJoinIndex(
 	db: TupleDb,
 	schema: Schema,
 	indexName: string,
@@ -206,7 +204,10 @@ function updateJoinView(
 
 		if (record.type === mySideDef.type) {
 			// Find matches
-			const matches = findMatches(db, schema, otherSideDef, record[mySideDef.on])
+			const matches = processQuery(db, schema, {
+				from: otherSideDef.type,
+				where: { [otherSideDef.on]: record[mySideDef.on] },
+			}).result
 
 			for (const match of matches) {
 				const left = side === "left" ? record : match
@@ -229,9 +230,9 @@ function updateJoinView(
 function processQuery(db: TupleDb, schema: Schema, q: QueryQuery): { schema: Schema; result: any } {
 	// 1. Identify intent
 	if (q.aggregate) {
-		return processAggregation(db, schema, q)
+		return processAggregationQuery(db, schema, q)
 	} else if (typeof q.from === "object") {
-		return processAdHocJoin(db, schema, q.from as JoinSchema, q)
+		return processAdHocJoinQuery(db, schema, q.from as JoinSchema, q)
 	} else if (
 		schema.indexes[q.from as string]?.from &&
 		typeof schema.indexes[q.from as string].from !== "string"
@@ -240,15 +241,15 @@ function processQuery(db: TupleDb, schema: Schema, q: QueryQuery): { schema: Sch
 		if (schema.indexes[target] && typeof schema.indexes[target].from !== "string") {
 			return processJoinScan(db, schema, target, q)
 		}
-		return processStandardQuery(db, schema, target, q)
+		return processRecordQuery(db, schema, target, q)
 	} else {
-		return processStandardQuery(db, schema, q.from as string, q)
+		return processRecordQuery(db, schema, q.from as string, q)
 	}
 }
 
-function processStandardQuery(db: TupleDb, schema: Schema, type: string, q: QueryQuery) {
+function processRecordQuery(db: TupleDb, schema: Schema, type: string, q: QueryQuery) {
 	// 1. Find or Create Index
-	const { indexName, schema: newSchema } = ensureStandardIndex(db, schema, type, q)
+	const { indexName, schema: newSchema } = ensureRecordIndex(db, schema, type, q)
 
 	// Handle Primary Scan
 	if (indexName === "primary") {
@@ -304,7 +305,7 @@ function processStandardQuery(db: TupleDb, schema: Schema, type: string, q: Quer
 	return { schema: newSchema, result: results }
 }
 
-function processAggregation(db: TupleDb, schema: Schema, q: QueryQuery) {
+function processAggregationQuery(db: TupleDb, schema: Schema, q: QueryQuery) {
 	const type = q.from as string
 
 	// Find matching aggregation index
@@ -366,20 +367,20 @@ function processAggregation(db: TupleDb, schema: Schema, q: QueryQuery) {
 	return { schema: newSchema, result }
 }
 
-function processAdHocJoin(db: TupleDb, schema: Schema, joinDef: JoinSchema, q: QueryQuery) {
-	// 1. Ensure indexes on join keys exist (Standard Indexes)
+function processAdHocJoinQuery(db: TupleDb, schema: Schema, joinDef: JoinSchema, q: QueryQuery) {
+	// 1. Ensure indexes on join keys exist (record indexes)
 	// We request FULL indexes (sort by ON key) so they can be reused for any value match.
 	let updatedSchema = schema
 
 	// Ensure Left Index (Full)
-	const { schema: s1 } = ensureStandardIndex(db, updatedSchema, joinDef.left.type, {
+	const { schema: s1 } = ensureRecordIndex(db, updatedSchema, joinDef.left.type, {
 		from: joinDef.left.type,
 		sort: [joinDef.left.on],
 	})
 	updatedSchema = s1
 
 	// Ensure Right Index (Full)
-	const { schema: s2 } = ensureStandardIndex(db, updatedSchema, joinDef.right.type, {
+	const { schema: s2 } = ensureRecordIndex(db, updatedSchema, joinDef.right.type, {
 		from: joinDef.right.type,
 		sort: [joinDef.right.on],
 	})
@@ -433,7 +434,7 @@ function processJoinScan(db: TupleDb, schema: Schema, joinName: string, q: Query
 // Helpers
 // ============================================================================
 
-function ensureStandardIndex(
+function ensureRecordIndex(
 	db: TupleDb,
 	schema: Schema,
 	type: string,
@@ -486,7 +487,10 @@ function backfillIndex(db: TupleDb, schema: Schema, indexName: string) {
 			.list()
 			.map((i) => i.value)
 		for (const leftRecord of records) {
-			const matches = findMatches(db, schema, joinDef.right, leftRecord[joinDef.left.on])
+			const matches = processQuery(db, schema, {
+				from: joinDef.right.type,
+				where: { [joinDef.right.on]: leftRecord[joinDef.left.on] },
+			}).result
 			for (const rightRecord of matches) {
 				const keyValues = joinDef.key.map(({ side: s, field }) =>
 					s === "left" ? leftRecord[field] : rightRecord[field]
@@ -502,9 +506,9 @@ function backfillIndex(db: TupleDb, schema: Schema, indexName: string) {
 			.map((i) => i.value)
 		for (const r of records) {
 			if (def.aggregate) {
-				updateAggregationView(db, indexName, def, r, 1)
+				updateAggregationIndex(db, indexName, def, r, 1)
 			} else {
-				updateStandardViewWithSchema(db, schema, type, indexName, def, r, 1)
+				updateRecordIndex(db, schema, type, indexName, def, r, 1)
 			}
 		}
 	}
@@ -526,15 +530,6 @@ function matchIndex(fields: string[], whereKeys: string[], sortKeys: string[]) {
 	if (!isEqual(suffix, sortKeys)) return false
 
 	return true
-}
-
-function findMatches(db: TupleDb, schema: Schema, sideDef: JoinSide, val: any): any[] {
-	// Re-uses query logic
-	const { result } = processQuery(db, schema, {
-		from: sideDef.type,
-		where: { [sideDef.on]: val },
-	})
-	return result
 }
 
 function increment(db: TupleDb, key: Tuple, delta: number) {
@@ -611,7 +606,7 @@ export function recordDb(db: TupleDb, initialSchema: Schema): RecordDb {
 			if (!oldRecord) return
 
 			db.delete([args.type, "primary", ...pk])
-			updateMaterializedViews(db, schema, { type: args.type, oldRecord, newRecord: null })
+			updateIndexes(db, schema, { type: args.type, oldRecord, newRecord: null })
 		},
 		set: (record) => {
 			const schema = getSchema()
@@ -621,7 +616,7 @@ export function recordDb(db: TupleDb, initialSchema: Schema): RecordDb {
 			const oldRecord = db.get([type, "primary", ...pk])
 
 			db.set([type, "primary", ...pk], record)
-			updateMaterializedViews(db, schema, { type, oldRecord, newRecord: record })
+			updateIndexes(db, schema, { type, oldRecord, newRecord: record })
 		},
 		query: (q) => {
 			const schema = getSchema()
