@@ -14,19 +14,21 @@ Create branches to experiment with new layers and implementations...
 ---
 
 
-I want to add the following functions to make this a little more usable.
+I want to add the following functions to make this a little more usable for me.
 
 isAmbiguousIndex(query) // Is this query an unambiguous query definition?
-toUnambiguousIndex(query) // Uses sorts where items and creates an unambiguous index definition, but doesnt look up existing indexes.
+toUnambiguousIndex(query) // Uses sorts where items and creates an unambiguous index definition that we'll use if we cant find a matching index.
 matchesIndex(query, index) // Does this index satisfy the query
-index = getIndex(query) // Looks up if there is a matching index for this query
+index = indexes.find(i => matchesIndex(query, i)) // Looks up if there is a matching index for this query, understanding where clause ordering
 
-
-
-createIndex(query) // doesn't actually run the query, errors if it already exists.
-hasIndex(query)
+createIndex(query) // doesn't actually run the query, errors if it already exists, will call toUnambiguousIndex when creating one.
+hasIndex(query) // returns boolean
 deleteIndex(query)
-ensureIndex(query)
+
+
+
+bestIndex(query, indexes) // Looks up the best index available for the query.
+
 
 
 

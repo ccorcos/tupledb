@@ -23,3 +23,8 @@ Lets do this kind refactor throughout
 ---
 
 Remove all unused code. Simply abstraction to favor composition and remove layers of indirection. Lets use consistency of language to make things easier to reason about. For example, functiona like backfillX, backfillY, updateX, updateY make the code easy to understand and feel organized.
+
+---
+
+Use composition rather than optional arguments that can lead to runtime errors.
+

@@ -237,18 +237,17 @@ function processQuery(db: TupleDb, schema: Schema, q: QueryQuery): { schema: Sch
 		return processJoinQuery(db, schema, q.from as JoinSchema, q)
 	}
 
-	const target = q.from as string
-	if (schema.indexes[target]) {
-		return processIndexScan(db, schema, target, q)
-	}
-
-	return processRecordQuery(db, schema, target, q)
+	return processRecordQuery(db, schema, q.from as string, q)
 }
 
 function processRecordQuery(db: TupleDb, schema: Schema, type: string, q: QueryQuery) {
-	// 1. Find or Create Index
 	const { indexName, schema: newSchema } = ensureRecordIndex(db, schema, type, q)
-	return processIndexScan(db, newSchema, indexName, q, { type })
+
+	if (indexName === "primary") {
+		return { schema: newSchema, result: processPrimaryScan(db, newSchema, type, q) }
+	}
+
+	return { schema: newSchema, result: processSecondaryIndexScan(db, newSchema, indexName, q) }
 }
 
 function processAggregationQuery(db: TupleDb, schema: Schema, q: QueryQuery) {
@@ -346,100 +345,87 @@ function processJoinQuery(db: TupleDb, schema: Schema, joinDef: JoinSchema, q: Q
 		updatedSchema = newSchema
 	}
 
-	return processIndexScan(db, updatedSchema, joinName, q)
+	return { schema: updatedSchema, result: processJoinScan(db, updatedSchema, joinName, q) }
 }
 
-function processIndexScan(
-	db: TupleDb,
-	schema: Schema,
-	indexName: string,
-	q: QueryQuery,
-	options?: { type?: string }
-): { schema: Schema; result: any } {
-	// Handle Primary Scan
-	if (indexName === "primary") {
-		const type = options?.type
-		if (!type) throw new Error("Primary scan requires type")
-		const typeDef = schema.types[type]
-		const prefixTuple = q.where ? unrollKey(q.where, typeDef.primary) : []
-		const listArgs = makeListArgs(
-			{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
-			prefixTuple.length,
-			typeDef.primary,
-			q
-		)
-		const results = db
-			.subspace([type, "primary", ...prefixTuple])
-			.list(listArgs)
-			.map(({ value }) => value)
-		return { schema, result: results }
-	}
+function processPrimaryScan(db: TupleDb, schema: Schema, type: string, q: QueryQuery) {
+	const typeDef = schema.types[type]
+	const prefixTuple = q.where ? unrollKey(q.where, typeDef.primary) : []
+	const listArgs = makeListArgs(
+		{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
+		prefixTuple.length,
+		typeDef.primary,
+		q
+	)
+	return db
+		.subspace([type, "primary", ...prefixTuple])
+		.list(listArgs)
+		.map(({ value }) => value)
+}
 
+function processJoinScan(db: TupleDb, schema: Schema, indexName: string, q: QueryQuery) {
 	const def = schema.indexes[indexName]
 	if (!def) throw new Error(`Index ${indexName} not found`)
 
-	if (typeof def.from !== "string") {
-		// Join Scan
-		const joinDef = def.from as JoinSchema
-		const keyFields = joinDef.key.map((k) => k.field)
+	const joinDef = def.from as JoinSchema
+	const keyFields = joinDef.key.map((k) => k.field)
 
-		const prefixTuple = q.where ? unrollKey(q.where, keyFields) : []
-		const listArgs = makeListArgs(
-			{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where }, // mixing args for simplicity
-			prefixTuple.length,
-			keyFields,
-			q
-		)
+	const prefixTuple = q.where ? unrollKey(q.where, keyFields) : []
+	const listArgs = makeListArgs(
+		{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where }, // mixing args for simplicity
+		prefixTuple.length,
+		keyFields,
+		q
+	)
 
-		const results = db
-			.subspace(["join", indexName, ...prefixTuple])
-			.list(listArgs)
-			.filter((item) => (item.value as number) > 0)
-			.map(({ key }) => {
-				const fullKey = [...prefixTuple, ...key]
-				const obj: any = {}
-				for (const [i, f] of keyFields.entries()) obj[f] = fullKey[i]
-				return obj
-			})
+	return db
+		.subspace(["join", indexName, ...prefixTuple])
+		.list(listArgs)
+		.filter((item) => (item.value as number) > 0)
+		.map(({ key }) => {
+			const fullKey = [...prefixTuple, ...key]
+			const obj: any = {}
+			for (const [i, f] of keyFields.entries()) obj[f] = fullKey[i]
+			return obj
+		})
+}
 
-		return { schema, result: results }
-	} else {
-		// Secondary Index Scan
-		const type = def.from
-		const typeDef = schema.types[type]
+function processSecondaryIndexScan(db: TupleDb, schema: Schema, indexName: string, q: QueryQuery) {
+	const def = schema.indexes[indexName]
+	if (!def) throw new Error(`Index ${indexName} not found`)
 
-		const sortKeys = def.sort || []
-		const indexFields = union(sortKeys, typeDef.primary)
+	const type = def.from as string
+	const typeDef = schema.types[type]
 
-		const prefixTuple = q.where ? unrollKey(q.where, indexFields) : []
-		const listArgs = makeListArgs(
-			{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
-			prefixTuple.length,
-			indexFields,
-			q
-		)
+	const sortKeys = def.sort || []
+	const indexFields = union(sortKeys, typeDef.primary)
 
-		const results = db
-			.subspace([type, indexName, ...prefixTuple])
-			.list(listArgs)
-			.map(({ key }) => {
-				const fullKey = [...prefixTuple, ...key]
+	const prefixTuple = q.where ? unrollKey(q.where, indexFields) : []
+	const listArgs = makeListArgs(
+		{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
+		prefixTuple.length,
+		indexFields,
+		q
+	)
 
-				// Reconstruct partial object from key
-				const keyObj: any = {}
-				for (let i = 0; i < indexFields.length; i++) {
-					keyObj[indexFields[i]] = fullKey[i]
-				}
+	return db
+		.subspace([type, indexName, ...prefixTuple])
+		.list(listArgs)
+		.map(({ key }) => {
+			const fullKey = [...prefixTuple, ...key]
 
-				// Extract PK in correct order
-				const pk = typeDef.primary.map((f) => keyObj[f])
+			// Reconstruct partial object from key
+			const keyObj: any = {}
+			for (let i = 0; i < indexFields.length; i++) {
+				keyObj[indexFields[i]] = fullKey[i]
+			}
 
-				return db.get([type, "primary", ...pk])
-			})
-			.filter((r) => r !== undefined)
+			// Extract PK in correct order
+			const pk = typeDef.primary.map((f) => keyObj[f])
 
-		return { schema, result: results }
-	}
+			return db.get([type, "primary", ...pk])
+		})
+		.filter((r) => r !== undefined)
 }
 
 // ============================================================================

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { JoinSchema, recordDb, Schema, AggregationOp } from "./RecordLayer"
+import { JoinSchema, recordDb, Schema } from "./RecordLayer"
 import { tupleDb } from "./TupleDb"
 
 // Define the types
@@ -38,9 +38,12 @@ describe("RecordLayer", () => {
 		layer.query({ from: "user", where: { name: "Chet" } })
 
 		// Find generated index name
-        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
-        const indexName = indexes.find(n => n.startsWith("auto_idx_user_"))
-        assert.ok(indexName)
+		const indexes = db
+			.subspace(["_schema", "indexes"])
+			.list()
+			.map((i) => i.key[0] as string)
+		const indexName = indexes.find((n) => n.startsWith("auto_idx_user_"))
+		assert.ok(indexName)
 
 		// Check index via tupleDb directly
 		// Key: [type, indexName, ...sortKeys, ...pk]
@@ -55,7 +58,7 @@ describe("RecordLayer", () => {
 		assert.equal(db.get(indexKey), undefined)
 
 		// New index key [..., "Chester", "u1"]
-        // Since the index is conditional (where name="Chet"), "Chester" is filtered out.
+		// Since the index is conditional (where name="Chet"), "Chester" is filtered out.
 		const newIndexKey = ["user", indexName!, "Chester", "u1"]
 		assert.equal(db.get(newIndexKey), undefined)
 	})
@@ -79,8 +82,11 @@ describe("RecordLayer", () => {
 		assert.deepEqual(results[1], user3)
 
 		// Assert index generation
-        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
-		assert.ok(indexes.some(n => n.startsWith("auto_idx_user_")))
+		const indexes = db
+			.subspace(["_schema", "indexes"])
+			.list()
+			.map((i) => i.key[0] as string)
+		assert.ok(indexes.some((n) => n.startsWith("auto_idx_user_")))
 	})
 
 	it("should maintain a count of posts per user", () => {
@@ -232,7 +238,7 @@ describe("RecordLayer", () => {
 		// Assert Schema generated
 		const joinName = `auto_join_follow_toId_follow_fromId`
 		assert.ok(db.get(["_schema", "indexes", joinName]))
-		
+
 		// Delete B -> C
 		layer.delete({ type: "follow", fromId: "B", toId: "C" })
 
@@ -258,7 +264,7 @@ describe("RecordLayer", () => {
 			from: "user",
 			where: { id: "u99", bio: "NoMatch" },
 		})
-		
+
 		assert.equal(results.length, 0, "Should return 0 results due to mismatched 'bio'")
 
 		// 2. Query by Primary Key + Matching Field
@@ -376,7 +382,7 @@ describe("RecordLayer Dynamic Query", () => {
 		types: {
 			item: { primary: ["id"] },
 		},
-		indexes: {}
+		indexes: {},
 	}
 
 	it("should automatically create an index for a filtered query", () => {
@@ -402,8 +408,11 @@ describe("RecordLayer Dynamic Query", () => {
 		assert.equal(fruits[1].name, "Banana")
 
 		// Check if schema was updated
-        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
-		assert.ok(indexes.some(n => n.startsWith("auto_idx_item_")))
+		const indexes = db
+			.subspace(["_schema", "indexes"])
+			.list()
+			.map((i) => i.key[0] as string)
+		assert.ok(indexes.some((n) => n.startsWith("auto_idx_item_")))
 
 		// Add a new item and ensure index is maintained
 		const i4: Item = { type: "item", id: "i4", name: "Date", category: "Fruit", price: 3 }
@@ -436,11 +445,14 @@ describe("RecordLayer Dynamic Query", () => {
 			where: { a: 1, b: 2 },
 		})
 
-        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
-        const testIndexes = indexes.filter(n => n.startsWith("auto_idx_test_"))
-        
-        // Should trigger only one index if they result in same structure
-        assert.equal(testIndexes.length, 1)
+		const indexes = db
+			.subspace(["_schema", "indexes"])
+			.list()
+			.map((i) => i.key[0] as string)
+		const testIndexes = indexes.filter((n) => n.startsWith("auto_idx_test_"))
+
+		// Should trigger only one index if they result in same structure
+		assert.equal(testIndexes.length, 1)
 	})
 
 	it("should reuse index for {where: {a, b}} if {sort: [b, a]} created one", () => {
@@ -466,8 +478,11 @@ describe("RecordLayer Dynamic Query", () => {
 		})
 		assert.equal(res.length, 1)
 
-        const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
-        const testIndexes = indexes.filter(n => n.startsWith("auto_idx_test_"))
+		const indexes = db
+			.subspace(["_schema", "indexes"])
+			.list()
+			.map((i) => i.key[0] as string)
+		const testIndexes = indexes.filter((n) => n.startsWith("auto_idx_test_"))
 		// Should still be 1 index
 		assert.equal(testIndexes.length, 1)
 	})
@@ -495,8 +510,11 @@ describe("RecordLayer Dynamic Query", () => {
 		assert.equal(result.count, 2)
 
 		// Check schema
-		const indexes = db.subspace(["_schema", "indexes"]).list().map(i => i.key[0] as string)
-        assert.ok(indexes.some(n => n.startsWith("auto_agg_item_")))
+		const indexes = db
+			.subspace(["_schema", "indexes"])
+			.list()
+			.map((i) => i.key[0] as string)
+		assert.ok(indexes.some((n) => n.startsWith("auto_agg_item_")))
 
 		// Add item, check maintenance
 		layer.set({ type: "item", id: "i4", name: "D", category: "Fruit", price: 5 })
@@ -515,7 +533,7 @@ describe("RecordLayer Scan & Aggregation", () => {
 
 	const schema: Schema = {
 		types: {
-			item: { primary: ["id"] }
+			item: { primary: ["id"] },
 		},
 		indexes: {
 			byCategory: { from: "item", sort: ["category", "price"] },
@@ -523,18 +541,18 @@ describe("RecordLayer Scan & Aggregation", () => {
 			totalPrice: {
 				from: "item",
 				groupBy: ["category"],
-				aggregate: { val: { kind: "sum", field: "price" } }
+				aggregate: { val: { kind: "sum", field: "price" } },
 			},
 			minPrice: {
 				from: "item",
 				groupBy: ["category"],
-				aggregate: { val: { kind: "min", field: "price" } }
+				aggregate: { val: { kind: "min", field: "price" } },
 			},
 			maxPrice: {
 				from: "item",
 				groupBy: ["category"],
-				aggregate: { val: { kind: "max", field: "price" } }
-			}
+				aggregate: { val: { kind: "max", field: "price" } },
+			},
 		},
 	}
 
@@ -604,11 +622,11 @@ describe("RecordLayer Sort", () => {
 
 	const schema: Schema = {
 		types: {
-			thing: { primary: ["id"] }
+			thing: { primary: ["id"] },
 		},
 		indexes: {
-			byA: { from: "thing", sort: ["a"] }
-		}
+			byA: { from: "thing", sort: ["a"] },
+		},
 	}
 
 	const db = tupleDb()

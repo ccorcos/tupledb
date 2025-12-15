@@ -242,6 +242,5 @@ function processQuery(db: TupleDb, schema: Schema, q: QueryQuery): { schema: Sch
 
 We can have a separate function called processIndexScan for querying over a named join, aggregation, or record index. But "contract" of the processQuery function is simple -- it will make sure there's an index and for that query as well as respond from that index.
 
-
 ---
 
