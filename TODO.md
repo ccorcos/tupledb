@@ -15,6 +15,18 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
+It seems indexes and queries are redundant definitions... `indexes: { [name: string]: string[] }` is equivalent to just `{sort: string[]}` which is just a query.
+
+
+export type AggregationSchema = {
+	source: string
+	groupBy: string[]
+	kind: "count" | "sum" | "min" | "max"
+	field?: string // Required for sum, min, max
+}
+
+
+
 
 Indexes can be defined as queries, right. It's just {sort: []}
 
