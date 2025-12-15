@@ -7,7 +7,7 @@ import { ListArgs, Tuple, TupleDb } from "./types"
 
 export type RecordSchema = {
 	primary: string[]
-	indexes?: { [name: string]: string[] }
+	[index: string]: string[]
 }
 
 export type AggregationSchema = {
@@ -254,8 +254,9 @@ function notifyReactors(db: TupleDb, schema: RecordDbSchema, change: Change) {
 
 	// 1. Indexes
 	const recordSchema = schema.records[type]
-	if (recordSchema?.indexes) {
-		for (const [name, fields] of Object.entries(recordSchema.indexes)) {
+	if (recordSchema) {
+		for (const [name, fields] of Object.entries(recordSchema)) {
+			if (name === "primary") continue
 			react((r, d) => IndexLogic.update(db, type, name, fields, r, d))
 		}
 	}
@@ -300,7 +301,7 @@ function ensureDefinition(
 }
 
 function backfillIndex(db: TupleDb, schema: RecordDbSchema, type: string, indexName: string) {
-	const fields = schema.records[type].indexes?.[indexName]
+	const fields = schema.records[type][indexName]
 	if (!fields) return
 	const records = scanAllRecords(db, type) // Use best available scan
 	for (const r of records) {
@@ -514,7 +515,8 @@ function ensurePerfectIndex(
 	if (deepEqual(needed, primary)) return { schema, indexName: "primary", schemaChanged: false }
 
 	// Check existing
-	const existing = Object.entries(schema.records[type].indexes || {}).find(([_, fields]) => {
+	const existing = Object.entries(schema.records[type]).find(([name, fields]) => {
+		if (name === "primary") return false
 		if (fields.length < requiredPrefix.length) return false
 		return deepEqual(fields.slice(0, requiredPrefix.length), requiredPrefix)
 	})
@@ -525,10 +527,9 @@ function ensurePerfectIndex(
 	const res = ensureDefinition(
 		db,
 		schema,
-		() => !!schema.records[type].indexes?.[indexName],
+		() => !!schema.records[type][indexName],
 		(s) => {
-			s.records[type].indexes = s.records[type].indexes || {}
-			s.records[type].indexes[indexName] = needed
+			s.records[type][indexName] = needed
 		},
 		(s) => backfillIndex(db, s, type, indexName)
 	)
@@ -557,10 +558,7 @@ function scanIndex(
 	indexName: string,
 	args: ScanArgs
 ): any[] {
-	const fields =
-		indexName === "primary"
-			? schema.records[type].primary
-			: schema.records[type].indexes![indexName]
+	const fields = schema.records[type][indexName]
 	const primary = schema.records[type].primary
 
 	// Map index fields to primary key positions

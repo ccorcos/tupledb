@@ -165,6 +165,9 @@ IndexMatch could be a bit cleaner... Just {name: string, fields: string[]} | und
 
 ---
 
+Lets refactor RecordSchema to look more like {primary: string[], [index: string]: string[]}
+
+
 
 
 

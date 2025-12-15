@@ -88,7 +88,7 @@ describe("RecordLayer", () => {
 
 		// Assert index generation
 		const s = db.get(["_schema", "current"]) as RecordDbSchema
-		assert.ok(s.records.user.indexes?.["auto_idx_name_id"])
+		assert.ok(s.records.user["auto_idx_name_id"])
 	})
 
 	it("should maintain a count of posts per user", () => {
@@ -241,7 +241,7 @@ describe("RecordLayer", () => {
 		const s = db.get(["_schema", "current"]) as RecordDbSchema
 		const joinName = `auto_join_follow_toId_follow_fromId`
 		assert.ok(s.joins?.[joinName])
-		assert.ok(s.records.follow.indexes?.["auto_idx_toId_fromId"]) // Left Side Index
+		assert.ok(s.records.follow["auto_idx_toId_fromId"]) // Left Side Index
 
 		// Delete B -> C
 		layer.delete({ type: "follow", fromId: "B", toId: "C" })
@@ -384,5 +384,290 @@ describe("RecordLayer", () => {
 		// UB follows Me. I should see pB1.
 		assert.equal(identityFeed.length, 1)
 		assert.equal(identityFeed[0].id, "pB1")
+	})
+})
+
+describe("RecordLayer Dynamic Query", () => {
+	type Item = { type: "item"; id: string; name: string; category: string; price: number }
+
+	const initialSchema: RecordDbSchema = {
+		records: {
+			item: { primary: ["id"] },
+		},
+	}
+
+	it("should automatically create an index for a filtered query", () => {
+		const db = tupleDb()
+		const layer = recordDb(db, initialSchema)
+
+		const i1: Item = { type: "item", id: "i1", name: "Apple", category: "Fruit", price: 1 }
+		const i2: Item = { type: "item", id: "i2", name: "Banana", category: "Fruit", price: 2 }
+		const i3: Item = { type: "item", id: "i3", name: "Carrot", category: "Veg", price: 1 }
+
+		layer.set(i1)
+		layer.set(i2)
+		layer.set(i3)
+
+		// Initial state: no indexes
+		const schemaBefore = db.get(["_schema", "current"]) as RecordDbSchema
+		assert.deepEqual(schemaBefore, initialSchema)
+
+		// Query requiring index on 'category'
+		const fruits = layer.query({
+			from: "item",
+			where: { category: "Fruit" },
+		})
+
+		assert.equal(fruits.length, 2)
+		assert.equal(fruits[0].name, "Apple")
+		assert.equal(fruits[1].name, "Banana")
+
+		// Check if schema was updated
+		const schemaAfter = db.get(["_schema", "current"]) as RecordDbSchema
+		const itemSchema = schemaAfter.records.item
+		const indexNames = Object.keys(itemSchema).filter((k) => k !== "primary")
+		assert.ok(indexNames.length > 0)
+		assert.ok(indexNames.some((name) => name.includes("category")))
+
+		// Add a new item and ensure index is maintained
+		const i4: Item = { type: "item", id: "i4", name: "Date", category: "Fruit", price: 3 }
+		layer.set(i4)
+
+		const fruits2 = layer.query({
+			from: "item",
+			where: { category: "Fruit" },
+		})
+		assert.equal(fruits2.length, 3)
+	})
+
+	it("should automatically create an aggregation view", () => {
+		const db = tupleDb()
+		const layer = recordDb(db, initialSchema)
+
+		const i1: Item = { type: "item", id: "i1", name: "A", category: "Fruit", price: 10 }
+		const i2: Item = { type: "item", id: "i2", name: "B", category: "Fruit", price: 20 }
+		const i3: Item = { type: "item", id: "i3", name: "C", category: "Veg", price: 5 }
+
+		layer.set(i1)
+		layer.set(i2)
+		layer.set(i3)
+
+		// Query count by category
+		const result = layer.query({
+			from: "item",
+			groupBy: ["category"],
+			aggregate: { count: "count" },
+			where: { category: "Fruit" },
+		})
+
+		// Result should be { count: 2 }
+		assert.equal(result.count, 2)
+
+		// Check schema
+		const schema = db.get(["_schema", "current"]) as RecordDbSchema
+		assert.ok(schema.aggregations)
+		const aggNames = Object.keys(schema.aggregations)
+		assert.ok(aggNames.some((n) => n.includes("count") && n.includes("category")))
+
+		// Add item, check maintenance
+		layer.set({ type: "item", id: "i4", name: "D", category: "Fruit", price: 5 })
+		const result2 = layer.query({
+			from: "item",
+			groupBy: ["category"],
+			aggregate: { count: "count" },
+			where: { category: "Fruit" },
+		})
+		assert.equal(result2.count, 3)
+	})
+})
+
+describe("RecordLayer Scan & Aggregation", () => {
+	type Item = { type: "item"; id: string; category: string; price: number; rating: number }
+
+	const schema: RecordDbSchema = {
+		records: {
+			item: {
+				primary: ["id"],
+				byCategory: ["category", "price", "id"],
+				byPrice: ["price", "id"],
+			},
+		},
+		aggregations: {
+			totalPrice: {
+				source: "item",
+				groupBy: ["category"],
+				kind: "sum",
+				field: "price",
+			},
+			minPrice: {
+				source: "item",
+				groupBy: ["category"],
+				kind: "min",
+				field: "price",
+			},
+			maxPrice: {
+				source: "item",
+				groupBy: ["category"],
+				kind: "max",
+				field: "price",
+			},
+		},
+	}
+
+	const db = tupleDb()
+	const layer = recordDb(db, schema)
+
+	it("should select the best index for scanning", () => {
+		const i1: Item = { type: "item", id: "i1", category: "A", price: 10, rating: 5 }
+		const i2: Item = { type: "item", id: "i2", category: "A", price: 20, rating: 4 }
+		const i3: Item = { type: "item", id: "i3", category: "B", price: 15, rating: 3 }
+
+		layer.set(i1)
+		layer.set(i2)
+		layer.set(i3)
+
+		// Query by category: Should use byCategory
+		const catA = layer.query({ from: "item", where: { category: "A" } })
+		assert.equal(catA.length, 2)
+		assert.equal(catA[0].id, "i1")
+		assert.equal(catA[1].id, "i2")
+
+		// Query by price: Should use byPrice
+		const price15 = layer.query({ from: "item", where: { price: 15 } })
+		assert.equal(price15.length, 1)
+		assert.equal(price15[0].id, "i3")
+	})
+
+	it("should aggregate sum, min, max", () => {
+		const db = tupleDb()
+		const layer = recordDb(db, schema)
+		const i1: Item = { type: "item", id: "i1", category: "A", price: 10, rating: 5 }
+		const i2: Item = { type: "item", id: "i2", category: "A", price: 20, rating: 4 }
+		const i3: Item = { type: "item", id: "i3", category: "A", price: 5, rating: 3 }
+
+		layer.set(i1) // A: sum=10, min=10, max=10
+		const q = (agg: "sum" | "min" | "max") => layer.query({
+			from: "item",
+			groupBy: ["category"],
+			aggregate: { val: agg },
+			where: { category: "A" }
+		}).val
+
+		assert.equal(q("sum"), 10)
+		assert.equal(q("min"), 10)
+		assert.equal(q("max"), 10)
+
+		layer.set(i2) // A: sum=30, min=10, max=20
+		assert.equal(q("sum"), 30)
+		assert.equal(q("min"), 10)
+		assert.equal(q("max"), 20)
+
+		layer.set(i3) // A: sum=35, min=5, max=20
+		assert.equal(q("sum"), 35)
+		assert.equal(q("min"), 5)
+		assert.equal(q("max"), 20)
+
+		layer.delete({ type: "item", id: "i2" }) // remove 20. sum=15, min=5, max=10
+		assert.equal(q("sum"), 15)
+		assert.equal(q("min"), 5)
+		assert.equal(q("max"), 10)
+	})
+
+	it("should fallback to primary key scan if no index matches but primary prefix does", () => {
+		const i1: Item = { type: "item", id: "i1", category: "A", price: 10, rating: 5 }
+		layer.set(i1)
+
+		const result = layer.query({ from: "item", where: { id: "i1" } })
+		assert.equal(result.length, 1)
+		assert.equal(result[0].id, "i1")
+	})
+})
+
+describe("RecordLayer Sort", () => {
+	type Thing = { type: "thing"; id: string; a: number; b: number }
+
+	const schema: RecordDbSchema = {
+		records: {
+			thing: {
+				primary: ["id"],
+				byA: ["a", "id"],
+			},
+		},
+	}
+
+	const db = tupleDb()
+	const layer = recordDb(db, schema)
+
+	it("should sort by existing index", () => {
+		const t1: Thing = { type: "thing", id: "t1", a: 10, b: 1 }
+		const t2: Thing = { type: "thing", id: "t2", a: 5, b: 2 }
+		const t3: Thing = { type: "thing", id: "t3", a: 20, b: 3 }
+
+		layer.set(t1)
+		layer.set(t2)
+		layer.set(t3)
+
+		// Sort by a
+		const res = layer.query({
+			from: "thing",
+			sort: ["a"]
+		})
+
+		assert.equal(res.length, 3)
+		assert.equal(res[0].id, "t2") // a=5
+		assert.equal(res[1].id, "t1") // a=10
+		assert.equal(res[2].id, "t3") // a=20
+	})
+
+	it("should sort reverse", () => {
+		// existing data t2(5), t1(10), t3(20)
+		const res = layer.query({
+			from: "thing",
+			sort: ["a"],
+			reverse: true
+		})
+
+		assert.equal(res.length, 3)
+		assert.equal(res[0].id, "t3") // a=20
+		assert.equal(res[1].id, "t1") // a=10
+		assert.equal(res[2].id, "t2") // a=5
+	})
+
+	it("should auto-create index for new sort field", () => {
+		// Sort by b (no index initially)
+		const res = layer.query({
+			from: "thing",
+			sort: ["b"]
+		})
+
+		assert.equal(res.length, 3)
+		assert.equal(res[0].id, "t1") // b=1
+		assert.equal(res[1].id, "t2") // b=2
+		assert.equal(res[2].id, "t3") // b=3
+	})
+
+	it("should sort by compound key", () => {
+		const db = tupleDb()
+		const layer = recordDb(db, schema)
+		
+		// Same 'a', different 'b'
+		const t1: Thing = { type: "thing", id: "t1", a: 10, b: 2 }
+		const t2: Thing = { type: "thing", id: "t2", a: 10, b: 1 }
+		const t3: Thing = { type: "thing", id: "t3", a: 5, b: 5 }
+
+		layer.set(t1)
+		layer.set(t2)
+		layer.set(t3)
+
+		// Sort by a, then b
+		const res = layer.query({
+			from: "thing",
+			sort: ["a", "b"]
+		})
+
+		assert.equal(res.length, 3)
+		assert.equal(res[0].id, "t3") // a=5
+		assert.equal(res[1].id, "t2") // a=10, b=1
+		assert.equal(res[2].id, "t1") // a=10, b=2
 	})
 })
