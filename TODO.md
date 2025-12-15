@@ -11,6 +11,20 @@ Create branches to experiment with new layers and implementations...
 - deferred eventually consistent job updates or whatever queue.
 
 
+---
+
+
+Write some tests for me to verify the following.
+
+
+
+
+
+
+
+
+
+
 
 
 ---
@@ -23,6 +37,9 @@ record scan index where: {a: 1, b: 2} needs to look for [a,b] and [b,a].
 
 Are joins looking for existing index?
 
+
+Is there any reason to have processAdHocJoin vs named joins? If its just about being terse, we could just query({from: schema.joins.namedJoin }) right?
+I'm not seeing any tests that use just the joinName as the target. Seems like it could also conflict with record type names too.
 
 
 
@@ -45,25 +62,6 @@ query = {
 
 
 Indexes can be defined as queries, right. It's just {sort: []}
-
-
-
-
-
-
-
----
-
-We have `lodash-es` installed so you can do things like deepClone with that instest of json stringify parse. Also isEqual
-
-Is there any reason to have processAdHocJoin vs named joins? If its just about being terse, we could just query({from: schema.joins.namedJoin }) right?
-I'm not seeing any tests that use just the joinName as the target. Seems like it could also conflict with record type names too.
-
-
-
-
-
-
 
 
 

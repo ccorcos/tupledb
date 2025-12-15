@@ -1,3 +1,4 @@
+import { cloneDeep, isEqual } from "lodash-es"
 import { compactObj } from "shared/compactObj"
 import { ListArgs, Tuple, TupleDb } from "./types"
 
@@ -193,7 +194,10 @@ function updateIndexes(db: TupleDb, schema: RecordDbSchema, change: Change) {
 function backfillRecordIndex(db: TupleDb, schema: RecordDbSchema, type: string, indexName: string) {
 	const fields = schema.records[type][indexName]
 	if (!fields) return
-	const records = db.subspace([type, "primary"]).list().map((i) => i.value)
+	const records = db
+		.subspace([type, "primary"])
+		.list()
+		.map((i) => i.value)
 	for (const r of records) {
 		updateRecordIndex(db, type, indexName, fields, r, 1)
 	}
@@ -202,7 +206,10 @@ function backfillRecordIndex(db: TupleDb, schema: RecordDbSchema, type: string, 
 function backfillAggregationIndex(db: TupleDb, schema: RecordDbSchema, name: string) {
 	const def = schema.aggregations?.[name]
 	if (!def) return
-	const records = db.subspace([def.source, "primary"]).list().map((i) => i.value)
+	const records = db
+		.subspace([def.source, "primary"])
+		.list()
+		.map((i) => i.value)
 	for (const r of records) {
 		updateAggregationIndex(db, name, def, r, 1)
 	}
@@ -215,7 +222,10 @@ function backfillJoinIndex(db: TupleDb, schema: RecordDbSchema, name: string) {
 	// For backfill, we iterate one side (Left) and find matches on the other (Right).
 	// This avoids double-counting that would occur if we used the bidirectional JoinLogic.update
 	// on every record (especially for self-joins).
-	const records = db.subspace([def.left.type, "primary"]).list().map((i) => i.value)
+	const records = db
+		.subspace([def.left.type, "primary"])
+		.list()
+		.map((i) => i.value)
 	for (const leftRecord of records) {
 		const matches = findMatches(db, schema, def.right, leftRecord[def.left.on])
 		for (const rightRecord of matches) {
@@ -273,7 +283,7 @@ function processAdHocJoin(db: TupleDb, schema: RecordDbSchema, joinDef: JoinSche
 	const joinName = `auto_join_${joinDef.left.type}_${joinDef.left.on}_${joinDef.right.type}_${joinDef.right.on}`
 
 	if (!updatedSchema.joins?.[joinName]) {
-		const newSchema = JSON.parse(JSON.stringify(updatedSchema))
+		const newSchema = cloneDeep(updatedSchema)
 		newSchema.joins = newSchema.joins || {}
 		newSchema.joins[joinName] = joinDef
 		backfillJoinIndex(db, newSchema, joinName)
@@ -320,14 +330,13 @@ function processAggregationQuery(db: TupleDb, schema: RecordDbSchema, type: stri
 
 		// Find existing
 		const existing = Object.entries(updatedSchema.aggregations || {}).find(
-			([_, def]) =>
-				def.source === type && def.kind === kind && deepEqual(def.groupBy.sort(), groupBy)
+			([_, def]) => def.source === type && def.kind === kind && isEqual(def.groupBy.sort(), groupBy)
 		)
 
 		if (!existing) {
 			const aggName = `auto_agg_${type}_${kind}_${groupBy.join("_")}`
-			
-			const newSchema = JSON.parse(JSON.stringify(updatedSchema))
+
+			const newSchema = cloneDeep(updatedSchema)
 			newSchema.aggregations = newSchema.aggregations || {}
 			newSchema.aggregations[aggName] = { source: type, groupBy, kind, field: undefined }
 			backfillAggregationIndex(db, newSchema, aggName)
@@ -341,8 +350,7 @@ function processAggregationQuery(db: TupleDb, schema: RecordDbSchema, type: stri
 	for (const [alias, kind] of Object.entries(q.aggregate!)) {
 		const groupBy = q.groupBy ? q.groupBy.sort() : []
 		const [name] = Object.entries(updatedSchema.aggregations!).find(
-			([_, def]) =>
-				def.source === type && def.kind === kind && deepEqual(def.groupBy.sort(), groupBy)
+			([_, def]) => def.source === type && def.kind === kind && isEqual(def.groupBy.sort(), groupBy)
 		)!
 
 		const aggDef = updatedSchema.aggregations![name]
@@ -393,20 +401,20 @@ function ensurePerfectIndex(
 	const needed = [...new Set([...requiredPrefix, ...primary])]
 
 	// If Primary Key works, use it (return undefined indexName)
-	if (deepEqual(needed, primary)) return { schema, indexName: "primary" }
+	if (isEqual(needed, primary)) return { schema, indexName: "primary" }
 
 	// Check existing
 	const existing = Object.entries(schema.records[type]).find(([name, fields]) => {
 		if (name === "primary") return false
 		if (fields.length < requiredPrefix.length) return false
-		return deepEqual(fields.slice(0, requiredPrefix.length), requiredPrefix)
+		return isEqual(fields.slice(0, requiredPrefix.length), requiredPrefix)
 	})
 	if (existing) return { schema, indexName: existing[0] }
 
 	// Create New
 	const indexName = `auto_idx_${needed.join("_")}`
-	
-	const newSchema = JSON.parse(JSON.stringify(schema))
+
+	const newSchema = cloneDeep(schema)
 	newSchema.records[type][indexName] = needed
 	backfillRecordIndex(db, newSchema, type, indexName)
 	saveSchema(db, newSchema)
@@ -496,10 +504,6 @@ function unrollKey(obj: any, fields: string[]): Tuple {
 		else break
 	}
 	return res
-}
-
-function deepEqual(a: any, b: any): boolean {
-	return JSON.stringify(a) === JSON.stringify(b)
 }
 
 function loadSchema(db: TupleDb): RecordDbSchema | null {
