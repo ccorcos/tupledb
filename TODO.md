@@ -16,6 +16,13 @@ Create branches to experiment with new layers and implementations...
 ---
 
 
+backfill indexes should try to use the best index it if possible instead of total table scan.
+
+record scan index where: {a: 1, b: 2} needs to look for [a,b] and [b,a].
+
+
+Are joins looking for existing index?
+
 
 
 
@@ -46,8 +53,6 @@ Indexes can be defined as queries, right. It's just {sort: []}
 
 
 ---
-
-Lets make some helper functions for managing the schema. Get schema, add index, delete index, etc. We can expose that on the recordDb too.
 
 We have `lodash-es` installed so you can do things like deepClone with that instest of json stringify parse. Also isEqual
 

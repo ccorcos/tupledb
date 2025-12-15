@@ -167,9 +167,9 @@ IndexMatch could be a bit cleaner... Just {name: string, fields: string[]} | und
 
 Lets refactor RecordSchema to look more like {primary: string[], [index: string]: string[]}
 
-
-
-
-
-
 ---
+
+Look at the refactoring we did since 0753212763404737aa348dccf4ea7a904870a8e6 commit. It looks good, but it seems like we can clean things up more though. Lets get rid of any unused code or abstractions. EnsurePerfectIndex has schemaChanged which doesnt appear to be used anywhere... The ViewStrategy seems like an unnecessary layer of abstraction and we should just focus on composition of functions. I like when the function names facilitate reading the code as if it were psuedocode written in plain english. And I like when there's consistency in naming... backfillRecordIndex, backfillAggregationIndex, backfillJoinIndex, etc.
+
+Lets take a close eye to things like the scanAllRecords function. First off, I don't think its worth having this function. It's too small and we should just inline that wherever we need it. Secondly, when we're doing things like `.filter((v) => v !== null)`, clearly this is wrong! This means that there's stuff in those indexes that we don't want. This was added to pass a test without ever tracing the root cause of the issue which we recently fixed. So lets review the code to make sure that the underlying logic makes sense.
+
