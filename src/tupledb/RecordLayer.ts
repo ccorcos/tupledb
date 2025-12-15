@@ -273,10 +273,10 @@ function processAdHocJoin(db: TupleDb, schema: RecordDbSchema, joinDef: JoinSche
 	let updatedSchema = schema
 
 	// Ensure indexes on both sides (required for efficient join updates)
-	const left = ensurePerfectIndex(db, updatedSchema, joinDef.left.type, [joinDef.left.on])
+	const left = ensureIndex(db, updatedSchema, joinDef.left.type, [joinDef.left.on])
 	updatedSchema = left.schema
 
-	const right = ensurePerfectIndex(db, updatedSchema, joinDef.right.type, [joinDef.right.on])
+	const right = ensureIndex(db, updatedSchema, joinDef.right.type, [joinDef.right.on])
 	updatedSchema = right.schema
 
 	// Ensure the Join View itself
@@ -374,13 +374,13 @@ function processRecordQuery(db: TupleDb, schema: RecordDbSchema, type: string, q
 	const sortKeys = q.sort || []
 	const requiredPrefix = [...whereKeys, ...sortKeys]
 
-	// 1. Ensure a "Perfect Index" exists for this specific query pattern
-	const res = ensurePerfectIndex(db, schema, type, requiredPrefix)
-	const perfectIndex = res.indexName
+	// 1. Ensure an index exists for this specific query pattern
+	const res = ensureIndex(db, schema, type, requiredPrefix)
+	const indexName = res.indexName
 
 	// 2. Scan
-	// We can assert perfectIndex is defined because ensurePerfectIndex now always returns 'primary' or a named index.
-	const results = scanIndex(db, res.schema, type, perfectIndex!, {
+	// We can assert indexName is defined because ensureIndex now always returns 'primary' or a named index.
+	const results = scanIndex(db, res.schema, type, indexName!, {
 		eq: q.where,
 		limit: q.limit,
 		reverse: q.reverse,
@@ -391,7 +391,7 @@ function processRecordQuery(db: TupleDb, schema: RecordDbSchema, type: string, q
 
 // --- Specific Ensure Logic ---
 
-function ensurePerfectIndex(
+function ensureIndex(
 	db: TupleDb,
 	schema: RecordDbSchema,
 	type: string,

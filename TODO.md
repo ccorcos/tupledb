@@ -13,21 +13,7 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
-
-Write some tests for me to verify the following.
-
-
-
-
-
-
-
-
-
-
-
-
----
+I want a way to query based on best indexes and a way to query based on ensuring an index.
 
 
 backfill indexes should try to use the best index it if possible instead of total table scan.
@@ -121,3 +107,10 @@ Join side with the optional index... lets dig into that. Why is that there? We s
 
 Taking it a step further, maybe want a feed of posts from followers of followers and we want to add and remove from this list as follows are created or deleted. But we only care about recent posts (datetime in the last 24 hours). Maybe we have a background job to cleanup or something, but the point is that we don't need to backfill everything.
 
+
+
+---
+
+# Syncing...
+
+contacts extreme case
