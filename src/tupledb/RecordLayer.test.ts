@@ -440,6 +440,82 @@ describe("RecordLayer Dynamic Query", () => {
 		assert.equal(fruits2.length, 3)
 	})
 
+	it("should use the same index for {a, b} and {b, a} due to key sorting", () => {
+		type TestRec = { type: "test"; id: string; a: number; b: number }
+		const db = tupleDb()
+		const layer = recordDb(db, { records: { test: { primary: ["id"] } } })
+
+		const r1: TestRec = { type: "test", id: "1", a: 1, b: 2 }
+		layer.set(r1)
+
+		// 1. Query with {a, b}
+		layer.query({
+			from: "test",
+			where: { b: 2, a: 1 },
+		})
+
+		const schema1 = db.get(["_schema", "current"]) as RecordDbSchema
+		const indexes1 = Object.keys(schema1.records.test).filter((k) => k !== "primary")
+		assert.equal(indexes1.length, 1)
+		const indexName1 = indexes1[0]
+		// The index name is auto generated based on the sorted keys, so it should be stable
+		assert.ok(indexName1.includes("a"))
+		assert.ok(indexName1.includes("b"))
+
+		// 2. Query with {b, a}
+		layer.query({
+			from: "test",
+			where: { a: 1, b: 2 },
+		})
+
+		const schema2 = db.get(["_schema", "current"]) as RecordDbSchema
+		const indexes2 = Object.keys(schema2.records.test).filter((k) => k !== "primary")
+
+		// Should still be 1 index if they are treated as the same
+		assert.equal(indexes2.length, 1)
+		assert.equal(indexes2[0], indexName1)
+	})
+
+	it("should reuse index for {where: {a, b}} if {sort: [b, a]} created one", () => {
+		type TestRec = { type: "test"; id: string; a: number; b: number }
+		const db = tupleDb()
+		const layer = recordDb(db, { records: { test: { primary: ["id"] } } })
+
+		const r1: TestRec = { type: "test", id: "1", a: 1, b: 2 }
+		layer.set(r1)
+
+		// 1. Query with {sort: [b, a]}
+		// This creates index [b, a, id]
+		layer.query({
+			from: "test",
+			sort: ["b", "a"],
+		})
+
+		const schema1 = db.get(["_schema", "current"]) as RecordDbSchema
+		const indexes1 = Object.keys(schema1.records.test).filter((k) => k !== "primary")
+		assert.equal(indexes1.length, 1)
+		const indexName = indexes1[0]
+		// Verify index structure starts with b, a
+		const fields = schema1.records.test[indexName]
+		assert.equal(fields[0], "b")
+		assert.equal(fields[1], "a")
+
+		// 2. Query with {where: {a, b}}
+		// Should reuse the existing index
+		const res = layer.query({
+			from: "test",
+			where: { a: 1, b: 2 },
+		})
+		assert.equal(res.length, 1)
+
+		const schema2 = db.get(["_schema", "current"]) as RecordDbSchema
+		const indexes2 = Object.keys(schema2.records.test).filter((k) => k !== "primary")
+
+		// Should still be 1 index
+		assert.equal(indexes2.length, 1)
+		assert.equal(indexes2[0], indexName)
+	})
+
 	it("should automatically create an aggregation view", () => {
 		const db = tupleDb()
 		const layer = recordDb(db, initialSchema)
@@ -546,12 +622,13 @@ describe("RecordLayer Scan & Aggregation", () => {
 		const i3: Item = { type: "item", id: "i3", category: "A", price: 5, rating: 3 }
 
 		layer.set(i1) // A: sum=10, min=10, max=10
-		const q = (agg: "sum" | "min" | "max") => layer.query({
-			from: "item",
-			groupBy: ["category"],
-			aggregate: { val: agg },
-			where: { category: "A" }
-		}).val
+		const q = (agg: "sum" | "min" | "max") =>
+			layer.query({
+				from: "item",
+				groupBy: ["category"],
+				aggregate: { val: agg },
+				where: { category: "A" },
+			}).val
 
 		assert.equal(q("sum"), 10)
 		assert.equal(q("min"), 10)
@@ -610,7 +687,7 @@ describe("RecordLayer Sort", () => {
 		// Sort by a
 		const res = layer.query({
 			from: "thing",
-			sort: ["a"]
+			sort: ["a"],
 		})
 
 		assert.equal(res.length, 3)
@@ -624,7 +701,7 @@ describe("RecordLayer Sort", () => {
 		const res = layer.query({
 			from: "thing",
 			sort: ["a"],
-			reverse: true
+			reverse: true,
 		})
 
 		assert.equal(res.length, 3)
@@ -637,7 +714,7 @@ describe("RecordLayer Sort", () => {
 		// Sort by b (no index initially)
 		const res = layer.query({
 			from: "thing",
-			sort: ["b"]
+			sort: ["b"],
 		})
 
 		assert.equal(res.length, 3)
@@ -649,7 +726,7 @@ describe("RecordLayer Sort", () => {
 	it("should sort by compound key", () => {
 		const db = tupleDb()
 		const layer = recordDb(db, schema)
-		
+
 		// Same 'a', different 'b'
 		const t1: Thing = { type: "thing", id: "t1", a: 10, b: 2 }
 		const t2: Thing = { type: "thing", id: "t2", a: 10, b: 1 }
@@ -662,7 +739,7 @@ describe("RecordLayer Sort", () => {
 		// Sort by a, then b
 		const res = layer.query({
 			from: "thing",
-			sort: ["a", "b"]
+			sort: ["a", "b"],
 		})
 
 		assert.equal(res.length, 3)

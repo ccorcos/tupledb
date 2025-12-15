@@ -1,4 +1,4 @@
-import { cloneDeep, isEqual } from "lodash-es"
+import { cloneDeep, isEqual, union } from "lodash-es"
 import { compactObj } from "shared/compactObj"
 import { ListArgs, Tuple, TupleDb } from "./types"
 
@@ -273,10 +273,10 @@ function processAdHocJoin(db: TupleDb, schema: RecordDbSchema, joinDef: JoinSche
 	let updatedSchema = schema
 
 	// Ensure indexes on both sides (required for efficient join updates)
-	const left = ensureIndex(db, updatedSchema, joinDef.left.type, [joinDef.left.on])
+	const left = ensureIndex(db, updatedSchema, joinDef.left.type, [joinDef.left.on], [])
 	updatedSchema = left.schema
 
-	const right = ensureIndex(db, updatedSchema, joinDef.right.type, [joinDef.right.on])
+	const right = ensureIndex(db, updatedSchema, joinDef.right.type, [joinDef.right.on], [])
 	updatedSchema = right.schema
 
 	// Ensure the Join View itself
@@ -329,9 +329,15 @@ function processAggregationQuery(db: TupleDb, schema: RecordDbSchema, type: stri
 		const groupBy = q.groupBy ? q.groupBy.sort() : []
 
 		// Find existing
-		const existing = Object.entries(updatedSchema.aggregations || {}).find(
-			([_, def]) => def.source === type && def.kind === kind && isEqual(def.groupBy.sort(), groupBy)
-		)
+		let existing = false
+		if (updatedSchema.aggregations) {
+			for (const [_, def] of Object.entries(updatedSchema.aggregations)) {
+				if (def.source === type && def.kind === kind && isEqual(def.groupBy.sort(), groupBy)) {
+					existing = true
+					break
+				}
+			}
+		}
 
 		if (!existing) {
 			const aggName = `auto_agg_${type}_${kind}_${groupBy.join("_")}`
@@ -349,11 +355,15 @@ function processAggregationQuery(db: TupleDb, schema: RecordDbSchema, type: stri
 	const result: any = {}
 	for (const [alias, kind] of Object.entries(q.aggregate!)) {
 		const groupBy = q.groupBy ? q.groupBy.sort() : []
-		const [name] = Object.entries(updatedSchema.aggregations!).find(
-			([_, def]) => def.source === type && def.kind === kind && isEqual(def.groupBy.sort(), groupBy)
-		)!
+		let name: string | undefined
+		for (const [n, def] of Object.entries(updatedSchema.aggregations!)) {
+			if (def.source === type && def.kind === kind && isEqual(def.groupBy.sort(), groupBy)) {
+				name = n
+				break
+			}
+		}
 
-		const aggDef = updatedSchema.aggregations![name]
+		const aggDef = updatedSchema.aggregations![name!]
 		const groupKey = ["aggregation", name, ...extractKey(q.where || {}, aggDef.groupBy)]
 
 		if (aggDef.kind === "count" || aggDef.kind === "sum") {
@@ -372,10 +382,9 @@ function processAggregationQuery(db: TupleDb, schema: RecordDbSchema, type: stri
 function processRecordQuery(db: TupleDb, schema: RecordDbSchema, type: string, q: QueryQuery) {
 	const whereKeys = q.where ? Object.keys(q.where).sort() : []
 	const sortKeys = q.sort || []
-	const requiredPrefix = [...whereKeys, ...sortKeys]
 
 	// 1. Ensure an index exists for this specific query pattern
-	const res = ensureIndex(db, schema, type, requiredPrefix)
+	const res = ensureIndex(db, schema, type, whereKeys, sortKeys)
 	const indexName = res.indexName
 
 	// 2. Scan
@@ -391,27 +400,43 @@ function processRecordQuery(db: TupleDb, schema: RecordDbSchema, type: string, q
 
 // --- Specific Ensure Logic ---
 
+function matchIndex(fields: string[], whereKeys: string[], sortKeys: string[]) {
+	if (fields.length < whereKeys.length + sortKeys.length) return false
+
+	// 1. Check Where Keys (Set equality)
+	const prefix = fields.slice(0, whereKeys.length)
+	const prefixSet = new Set(prefix)
+	if (prefixSet.size !== whereKeys.length) return false
+	for (const k of whereKeys) {
+		if (!prefixSet.has(k)) return false
+	}
+
+	// 2. Check Sort Keys (Order equality)
+	const suffix = fields.slice(whereKeys.length, whereKeys.length + sortKeys.length)
+	if (!isEqual(suffix, sortKeys)) return false
+
+	return true
+}
+
 function ensureIndex(
 	db: TupleDb,
 	schema: RecordDbSchema,
 	type: string,
-	requiredPrefix: string[]
+	whereKeys: string[],
+	sortKeys: string[] = []
 ): { schema: RecordDbSchema; indexName: string } {
 	const primary = schema.records[type].primary
-	const needed = [...new Set([...requiredPrefix, ...primary])]
 
-	// If Primary Key works, use it (return undefined indexName)
-	if (isEqual(needed, primary)) return { schema, indexName: "primary" }
+	if (matchIndex(primary, whereKeys, sortKeys)) return { schema, indexName: "primary" }
 
 	// Check existing
-	const existing = Object.entries(schema.records[type]).find(([name, fields]) => {
-		if (name === "primary") return false
-		if (fields.length < requiredPrefix.length) return false
-		return isEqual(fields.slice(0, requiredPrefix.length), requiredPrefix)
-	})
-	if (existing) return { schema, indexName: existing[0] }
+	for (const [name, fields] of Object.entries(schema.records[type])) {
+		if (name === "primary") continue
+		if (matchIndex(fields, whereKeys, sortKeys)) return { schema, indexName: name }
+	}
 
 	// Create New
+	const needed = union(whereKeys, sortKeys, primary)
 	const indexName = `auto_idx_${needed.join("_")}`
 
 	const newSchema = cloneDeep(schema)

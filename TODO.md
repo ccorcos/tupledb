@@ -13,16 +13,12 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
+
+s
+
 I want a way to query based on best indexes and a way to query based on ensuring an index.
 
-
-backfill indexes should try to use the best index it if possible instead of total table scan.
-
-record scan index where: {a: 1, b: 2} needs to look for [a,b] and [b,a].
-
-
 Are joins looking for existing index?
-
 
 Is there any reason to have processAdHocJoin vs named joins? If its just about being terse, we could just query({from: schema.joins.namedJoin }) right?
 I'm not seeing any tests that use just the joinName as the target. Seems like it could also conflict with record type names too.
@@ -47,14 +43,6 @@ query = {
 
 
 
-Indexes can be defined as queries, right. It's just {sort: []}
-
-
-
----
-
-Regarding @src/tupledb/RecordLayer.ts, lets refactor things to make thing more concise and therefore easier to read.
-
 Certain things like the JoinSchema seem like they are much more verbose than they need to be and without any loss in generality we can specify it more like this:
 
 const joinDef: JoinSchema = {
@@ -66,11 +54,14 @@ const joinDef: JoinSchema = {
 	],
 }
 
+
 ---
 
 Can you think of some examples of a three-way join? I'm imagining a discovery feed where you see posts not by people you follow but only my people who you follow follow. There might be a tricky piece here where we're excluding from the results. Not sure how to implement this.
 
 ---
+
+
 
 discovery feed: posts by follows of follows.
 

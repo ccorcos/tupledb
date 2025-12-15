@@ -173,3 +173,32 @@ Look at the refactoring we did since 0753212763404737aa348dccf4ea7a904870a8e6 co
 
 Lets take a close eye to things like the scanAllRecords function. First off, I don't think its worth having this function. It's too small and we should just inline that wherever we need it. Secondly, when we're doing things like `.filter((v) => v !== null)`, clearly this is wrong! This means that there's stuff in those indexes that we don't want. This was added to pass a test without ever tracing the root cause of the issue which we recently fixed. So lets review the code to make sure that the underlying logic makes sense.
 
+
+---
+
+write a test where we query {sort: [b, a]} which will create an index. And then {where: {a, b}} should be able to reuse that index rather than create another index.
+
+---
+
+From a coding style perspective, I prefer to use loops if you can do so without having to mutate a variable. For example:
+
+This code
+
+	// Check existing
+	const existing = Object.entries(schema.records[type]).find(([name, fields]) => {
+		if (name === "primary") return false
+		return matchIndex(fields, whereKeys, sortKeys)
+	})
+	if (existing) return { schema, indexName: existing[0] }
+
+
+Can be refactored into
+
+	for (const [name, fields] in Object.entries(schema.records[type])) {
+		if (name === "primary") continue
+		const match = matchIndex(fiels, whereKeys, sortKeys)
+		if (match) return match
+	}
+
+Lets do this kind refactor throughout
+
