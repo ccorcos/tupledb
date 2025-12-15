@@ -11,6 +11,36 @@ Create branches to experiment with new layers and implementations...
 - deferred eventually consistent job updates or whatever queue.
 
 
+
+
+---
+
+
+Indexes can be defined as queries, right. It's just {sort: []}
+
+
+
+
+
+
+
+---
+
+Lets make some helper functions for managing the schema. Get schema, add index, delete index, etc. We can expose that on the recordDb too.
+
+We have `lodash-es` installed so you can do things like deepClone with that instest of json stringify parse. Also isEqual
+
+Is there any reason to have processAdHocJoin vs named joins? If its just about being terse, we could just query({from: schema.joins.namedJoin }) right?
+I'm not seeing any tests that use just the joinName as the target. Seems like it could also conflict with record type names too.
+
+
+
+
+
+
+
+
+
 ---
 
 Regarding @src/tupledb/RecordLayer.ts, lets refactor things to make thing more concise and therefore easier to read.
@@ -26,14 +56,9 @@ const joinDef: JoinSchema = {
 	],
 }
 
-
 ---
 
-Refactor things to be cleaner and more concise. processQuery is a big function that feels like it could be broken up.
-
-
 Can you think of some examples of a three-way join? I'm imagining a discovery feed where you see posts not by people you follow but only my people who you follow follow. There might be a tricky piece here where we're excluding from the results. Not sure how to implement this.
-
 
 ---
 

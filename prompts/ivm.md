@@ -141,3 +141,24 @@ Write a couple of different join queries:
 - timeline feed is a list of time ordered posts by users that another user follows.
 - the identity feed is similar to the timeline feed, but it's relative to the people who follow you. the idea being that this help the user understand who they're broadcasting to.
 
+
+---
+
+
+Regarding @src/tupledb/RecordLayer.ts, please refactor things to be cleaner and more concise. `processQuery` is a really long function that feels like it could be broken up. And it's not super clear the process of finding indexes, checking if they're a perfect match, if not a perfect match (only partial), then we'll want to generate and backfill the perfect index, and we should backfill by scanning over the best index we can find. Aggregations and joins feel like they're different enough that they should have their own factored out logic.
+
+
+---
+
+This looks good, but scanSmart still feels a little vague to me in terms of its functionality.
+
+It seems we should have some helper functions specifically for finding indexes for queries. It can return whether there's a perfect match or a best match. Then from there we can either decide to scan the perfect index, or generate the perfect index using the best index and checkMatch.
+
+findMatches shouldn't use scanSmart but actually just use processQuery. That would ensure that the intermediate indexes are created and maintained for the join query.
+
+I think its important that we don't use checkMatch in order to avoid generating the perfect index for a user query.
+
+
+---
+
+IndexMatch could be a bit cleaner... Just {name: string, fields: string[]} | undefined. We can determine if its a full match based on fields.length.
