@@ -222,3 +222,26 @@ Help me think through this. List the costs and benefits. Consider various trade-
 
 
 ---
+
+I'd like to see processQuery logic simplified a little bit.
+
+Something more like:
+
+function processQuery(db: TupleDb, schema: Schema, q: QueryQuery): { schema: Schema; result: any } {
+
+	if (q.aggregate) {
+		return processAggregationQuery(db, schema, q)
+	}
+
+	if (typeof q.from === "object") {
+		return processJoinQuery(db, schema, q.from as JoinSchema, q)
+	}
+
+	return processRecordQuery(db, schema, target, q)
+}
+
+We can have a separate function called processIndexScan for querying over a named join, aggregation, or record index. But "contract" of the processQuery function is simple -- it will make sure there's an index and for that query as well as respond from that index.
+
+
+---
+

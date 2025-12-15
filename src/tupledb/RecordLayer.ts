@@ -231,78 +231,24 @@ function processQuery(db: TupleDb, schema: Schema, q: QueryQuery): { schema: Sch
 	// 1. Identify intent
 	if (q.aggregate) {
 		return processAggregationQuery(db, schema, q)
-	} else if (typeof q.from === "object") {
-		return processAdHocJoinQuery(db, schema, q.from as JoinSchema, q)
-	} else if (
-		schema.indexes[q.from as string]?.from &&
-		typeof schema.indexes[q.from as string].from !== "string"
-	) {
-		const target = q.from as string
-		if (schema.indexes[target] && typeof schema.indexes[target].from !== "string") {
-			return processJoinScan(db, schema, target, q)
-		}
-		return processRecordQuery(db, schema, target, q)
-	} else {
-		return processRecordQuery(db, schema, q.from as string, q)
 	}
+
+	if (typeof q.from === "object") {
+		return processJoinQuery(db, schema, q.from as JoinSchema, q)
+	}
+
+	const target = q.from as string
+	if (schema.indexes[target]) {
+		return processIndexScan(db, schema, target, q)
+	}
+
+	return processRecordQuery(db, schema, target, q)
 }
 
 function processRecordQuery(db: TupleDb, schema: Schema, type: string, q: QueryQuery) {
 	// 1. Find or Create Index
 	const { indexName, schema: newSchema } = ensureRecordIndex(db, schema, type, q)
-
-	// Handle Primary Scan
-	if (indexName === "primary") {
-		const typeDef = newSchema.types[type]
-		const prefixTuple = q.where ? unrollKey(q.where, typeDef.primary) : []
-		const listArgs = makeListArgs(
-			{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
-			prefixTuple.length,
-			typeDef.primary,
-			q
-		)
-		const results = db
-			.subspace([type, "primary", ...prefixTuple])
-			.list(listArgs)
-			.map(({ value }) => value)
-		return { schema: newSchema, result: results }
-	}
-
-	// Handle Secondary Index Scan
-	const def = newSchema.indexes[indexName]
-	const typeDef = newSchema.types[type]
-
-	const sortKeys = def.sort || []
-	const indexFields = union(sortKeys, typeDef.primary)
-
-	const prefixTuple = q.where ? unrollKey(q.where, indexFields) : []
-	const listArgs = makeListArgs(
-		{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
-		prefixTuple.length,
-		indexFields,
-		q
-	)
-
-	const results = db
-		.subspace([type, indexName, ...prefixTuple])
-		.list(listArgs)
-		.map(({ key }) => {
-			const fullKey = [...prefixTuple, ...key]
-
-			// Reconstruct partial object from key
-			const keyObj: any = {}
-			for (let i = 0; i < indexFields.length; i++) {
-				keyObj[indexFields[i]] = fullKey[i]
-			}
-
-			// Extract PK in correct order
-			const pk = typeDef.primary.map((f) => keyObj[f])
-
-			return db.get([type, "primary", ...pk])
-		})
-		.filter((r) => r !== undefined)
-
-	return { schema: newSchema, result: results }
+	return processIndexScan(db, newSchema, indexName, q, { type })
 }
 
 function processAggregationQuery(db: TupleDb, schema: Schema, q: QueryQuery) {
@@ -367,7 +313,7 @@ function processAggregationQuery(db: TupleDb, schema: Schema, q: QueryQuery) {
 	return { schema: newSchema, result }
 }
 
-function processAdHocJoinQuery(db: TupleDb, schema: Schema, joinDef: JoinSchema, q: QueryQuery) {
+function processJoinQuery(db: TupleDb, schema: Schema, joinDef: JoinSchema, q: QueryQuery) {
 	// 1. Ensure indexes on join keys exist (record indexes)
 	// We request FULL indexes (sort by ON key) so they can be reused for any value match.
 	let updatedSchema = schema
@@ -400,34 +346,100 @@ function processAdHocJoinQuery(db: TupleDb, schema: Schema, joinDef: JoinSchema,
 		updatedSchema = newSchema
 	}
 
-	return processJoinScan(db, updatedSchema, joinName, q)
+	return processIndexScan(db, updatedSchema, joinName, q)
 }
 
-function processJoinScan(db: TupleDb, schema: Schema, joinName: string, q: QueryQuery) {
-	const def = schema.indexes[joinName]
-	const joinDef = def.from as JoinSchema
-	const keyFields = joinDef.key.map((k) => k.field)
+function processIndexScan(
+	db: TupleDb,
+	schema: Schema,
+	indexName: string,
+	q: QueryQuery,
+	options?: { type?: string }
+): { schema: Schema; result: any } {
+	// Handle Primary Scan
+	if (indexName === "primary") {
+		const type = options?.type
+		if (!type) throw new Error("Primary scan requires type")
+		const typeDef = schema.types[type]
+		const prefixTuple = q.where ? unrollKey(q.where, typeDef.primary) : []
+		const listArgs = makeListArgs(
+			{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
+			prefixTuple.length,
+			typeDef.primary,
+			q
+		)
+		const results = db
+			.subspace([type, "primary", ...prefixTuple])
+			.list(listArgs)
+			.map(({ value }) => value)
+		return { schema, result: results }
+	}
 
-	const prefixTuple = q.where ? unrollKey(q.where, keyFields) : []
-	const listArgs = makeListArgs(
-		{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where }, // mixing args for simplicity
-		prefixTuple.length,
-		keyFields,
-		q
-	)
+	const def = schema.indexes[indexName]
+	if (!def) throw new Error(`Index ${indexName} not found`)
 
-	const results = db
-		.subspace(["join", joinName, ...prefixTuple])
-		.list(listArgs)
-		.filter((item) => (item.value as number) > 0)
-		.map(({ key }) => {
-			const fullKey = [...prefixTuple, ...key]
-			const obj: any = {}
-			for (const [i, f] of keyFields.entries()) obj[f] = fullKey[i]
-			return obj
-		})
+	if (typeof def.from !== "string") {
+		// Join Scan
+		const joinDef = def.from as JoinSchema
+		const keyFields = joinDef.key.map((k) => k.field)
 
-	return { schema, result: results }
+		const prefixTuple = q.where ? unrollKey(q.where, keyFields) : []
+		const listArgs = makeListArgs(
+			{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where }, // mixing args for simplicity
+			prefixTuple.length,
+			keyFields,
+			q
+		)
+
+		const results = db
+			.subspace(["join", indexName, ...prefixTuple])
+			.list(listArgs)
+			.filter((item) => (item.value as number) > 0)
+			.map(({ key }) => {
+				const fullKey = [...prefixTuple, ...key]
+				const obj: any = {}
+				for (const [i, f] of keyFields.entries()) obj[f] = fullKey[i]
+				return obj
+			})
+
+		return { schema, result: results }
+	} else {
+		// Secondary Index Scan
+		const type = def.from
+		const typeDef = schema.types[type]
+
+		const sortKeys = def.sort || []
+		const indexFields = union(sortKeys, typeDef.primary)
+
+		const prefixTuple = q.where ? unrollKey(q.where, indexFields) : []
+		const listArgs = makeListArgs(
+			{ eq: q.where, limit: q.limit, reverse: q.reverse, ...q.where },
+			prefixTuple.length,
+			indexFields,
+			q
+		)
+
+		const results = db
+			.subspace([type, indexName, ...prefixTuple])
+			.list(listArgs)
+			.map(({ key }) => {
+				const fullKey = [...prefixTuple, ...key]
+
+				// Reconstruct partial object from key
+				const keyObj: any = {}
+				for (let i = 0; i < indexFields.length; i++) {
+					keyObj[indexFields[i]] = fullKey[i]
+				}
+
+				// Extract PK in correct order
+				const pk = typeDef.primary.map((f) => keyObj[f])
+
+				return db.get([type, "primary", ...pk])
+			})
+			.filter((r) => r !== undefined)
+
+		return { schema, result: results }
+	}
 }
 
 // ============================================================================

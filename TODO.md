@@ -13,7 +13,25 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
-refactor -> ivm-refactor.md
+
+I want to add the following functions to make this a little more usable.
+
+isAmbiguousIndex(query) // Is this query an unambiguous query definition?
+toUnambiguousIndex(query) // Uses sorts where items and creates an unambiguous index definition, but doesnt look up existing indexes.
+matchesIndex(query, index) // Does this index satisfy the query
+index = getIndex(query) // Looks up if there is a matching index for this query
+
+
+
+createIndex(query) // doesn't actually run the query, errors if it already exists.
+hasIndex(query)
+deleteIndex(query)
+ensureIndex(query)
+
+
+
+
+
 
 
 - generalize ideas...
