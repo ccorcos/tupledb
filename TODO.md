@@ -14,39 +14,337 @@ Create branches to experiment with new layers and implementations...
 ---
 
 
-I want to add the following functions to make this a little more usable for me.
-
-isAmbiguousIndex(query) // Is this query an unambiguous query definition?
-toUnambiguousIndex(query) // Uses sorts where items and creates an unambiguous index definition that we'll use if we cant find a matching index.
-matchesIndex(query, index) // Does this index satisfy the query
-index = indexes.find(i => matchesIndex(query, i)) // Looks up if there is a matching index for this query, understanding where clause ordering
-
-createIndex(query) // doesn't actually run the query, errors if it already exists, will call toUnambiguousIndex when creating one.
-hasIndex(query) // returns boolean
-deleteIndex(query)
 
 
+TODO: Multi-step refactoring prompt chain...
 
-bestIndex(query, indexes) // Looks up the best index available for the query.
+---
 
-
-
-
-
+We need an ability to add comparisons.
 
 
+```ts
+db.query({
+	from: "post",
+	where: {
+		author: 1,
+		datetime: {$gte: 1234},
+	},
+	limit: 10,
+	reverse: true,
+})
+```
 
-- generalize ideas...
-	- indexing indexes and querying for indexes.
-	- where {type } instead of from: type.
-	-
+Are there compound indexes with alternating sorts that aren't possible with this approach?
+
+```ts
+db.query({from: "x", where: {a: {$gte 1}, b: {$lte: 2}, c: {$gte: 3}})
+```
+
+For now, lets just throw and error. But lets consider how we might do this
 
 ---
 
 
-I want a way to query based on best indexes and a way to query based on ensuring an index.
+Lets change the way join queries are represented by introducing variables and subqueries.
 
-Are joins looking for existing index?
+The from clause is for named subqueries which can be used in where and sort later.
+
+So here are some ideas.
+
+```ts
+const fof = db.query({
+	from: {
+		a: {from: "follow", where: {toId: "$a"}},
+		b: {from: "follow", where: {fromId: "$a"}},
+	},
+	where: {
+		a: {fromId: "1"},
+	},
+	sort: [
+		{b: "toId"}
+	],
+})
+
+// Another way.
+const fof = db.query({
+	from: {
+		a: {from: "follow"},
+		b: {from: "follow"},
+	},
+	where: {
+		a: {toId: "$a"},
+		b: {fromId: "$a"},
+		a: {fromId: "1"},
+	},
+	sort: [
+		{b: "toId"}
+	],
+})
+
+// Another way with extra variables for easier comprehension.
+const fof = db.query({
+	from: {
+		a: {from: "follow", where: {fromId: "$user", toId: "$a"}},
+		b: {from: "follow", where: {fromId: "$a", toId: "$fof"}},
+	},
+	where: {
+		$user: "1",
+	},
+	sort: [
+		"$fof",
+	],
+})
+```
+
+Just to stress this abstraction a bit more, lets see how we can sort follows of follows based on the time in which the follow was made.
+
+```ts
+const fof = db.query({
+	from: {
+		a: {from: "follow", where: {fromId: "$user", toId: "$a", createdAt: "$t1"}},
+		b: {from: "follow", where: {fromId: "$a", toId: "$fof", createdAt: "$t2"}},
+	},
+	where: {
+		$user: "1",
+	},
+	sort: [
+		"$t1",
+		"$t2",
+	],
+	reverse: true
+})
+```
+
+Now we have a list of follows of follows in order similar to that which the network evolved.
+
+---
+
+This new way of expression joins makes it possible to join n-ways too. For example, here's friends of friends of friends...
+
+```ts
+const fofof = db.query({
+	from: {
+		a: {from: "follow", where: {toId: "$f1", fromId: "$f0"}},
+		b: {from: "follow", where: {fromId: "$f1", toId: "$f2"}},
+		c: {from: "follow", where: {fromId: "$f2", toId: "$f3"}},
+	},
+	where: {
+		$f0: "1"
+	},
+})
+```
+
+The the index will need to contain f0, f1, f2, and f3. What we likely care about is just the unique set of follows though.
+
+```ts
+const fofof = db.query({
+	from: {
+		a: {from: "follow", where: {toId: "$f1", fromId: "$f0"}},
+		b: {from: "follow", where: {fromId: "$f1", toId: "$f2"}},
+		c: {from: "follow", where: {fromId: "$f2", toId: "$f3"}},
+	},
+	where: {
+		$f0: "1"
+	},
+	groupBy: ["$f1"],
+	aggregate: {$f3: "unique"}
+})
+```
+
+Now the question is how can we order this by createdAt time while still being unique and taking the earlier value...
+
+???
+
+---
+
+
+Let assume posts can have an array of tags. Users want to sort their timelines based on tags. And a post can be viewed in any of those timelines. The notification should only appear once.
+
+---
+
+Maybe subqueries should be `with` and not overloading `from`.
+
+
+
+---
+
+Plane work...
+
+Lets think through things methodically. With examples.
+- create schema
+- create indexes
+- run queries with auto-indexing
+
+- reactivity (mostly for the client side)
+- syncable buckets, server authority clock, optional history
+
+later:
+- run queries without auto-indexing
+- use very simple histogram heuristics for query planning
+- p2p syncable buckets
+
+- how to index in batches with a cursor in a way thats also recoverable?
+- how would we scale this system to something like postgres or foundationdb?
+
+- How could we add the capability for conditional indexes?
+- Run a query without creating an index by using selecting a suitable best index.
+	- histogram trackign for query planning?
+
+more thinking:
+- can we break apart these different types of query systems and compose them?
+- how can we implement interval trees in a way that composes?
+	- how can we make compound interval trees?
+	- is this just a generalization of aggregation queries?
+- what are some more complicated queries that we cannot support?
+	- **how can we index multiple types together. eliminate {where: {type}} from the query.**
+	- what about querying with or vs and for multiple types.
+	- triple join?
+	- join with aggregation?
+	- seems like we should maintain relationships between indexes when one relies on another like joins. deleting a join index could potentially propagate.
+	- what is zql test suite contain in terms of queries.
+- how can we LRU cache indexes or lazily update indexes.
+- how can we lazily fan out writes?
+	- basically every sync block can have its own clock relative to the authoratative write log. And it can query that log for relevant writes.
+
+schema management...
+- schema should be serializable, but perhaps migrations shouldn't be automatic.
+- types are a coarse form a sharding.
+- the main reason we can't do without types entirely is so we can define compound primary keys.
+	- if we manually unroll primary keys and we have an id convention that can be compound, then we couuld drop the entire concept of types.
+		- then we'd need indexes for where {type} from would be irrelevant, it wouuld be more like with...
+- types reduce flexibility.
+	- suppose you have notifications with join userId and postId. But then you want another kind of notification that's just a message from the admin. This just has a normal id. OK, it could totally just be another type, but then we'd want to merge our queries... And so long as that's possible, I think its fine. Because devs want schemas. Its makes it easier to think and reason about things.
+
+
+
+
+```ts
+const schema: Schema = {
+	types: {
+		user: { primary: ["id"] },
+		post: { primary: ["id"] },
+		follow: { primary: ["fromId", "toId"] },
+		notification: { primary: ["userId", "postId"] },
+	},
+	indexes: {},
+}
+
+
+db.createType({user: ["id"]})
+db.createType({post: ["id"]})
+db.createType({follow: ["fromId", "toId"]})
+db.createType({notification: ["userId", "postId"]})
+
+// Manually create an index.
+db.createIndex({from: "follow", sort: ["toId", "fromId"]}, /* optional name */)
+
+// Looks like we can do a cleaner
+const timeline = db.query({
+	from: {
+		a: {from: "follow"},
+		b: {from: "post"}, // could even put a where clause in here...
+	},
+	where: {
+		$user: "1",
+		a: {toId: "$user"},
+		b: {authorId: "$user"},
+		b: {datetime: {$gte: "1234"}},
+	},
+	sort: [
+		{b: "datetime"},
+		{b: "id"}
+	],
+	reverse: true,
+	limit: 10
+})
+
+// Variables for matching. It can all unfold into where.
+const discover = db.query({
+	from: {
+		a: {from: "follow", where: {toId: "$a"}},
+		b: {from: "follow", where: {fromId: "$a"}},
+	},
+	where: {
+		a: {fromId: "1"},
+	},
+	sort: [
+		{b: "toId"}
+	],
+})
+
+
+// Use variables like f0 and f3 just for convenience.
+const discover = db.query({
+	from: {
+		a: {from: "follow", where: {toId: "$f1", fromId: "$f0"}},
+		b: {from: "follow", where: {fromId: "$f1", toId: "$f2"}},
+		c: {from: "follow", where: {fromId: "$f2", toId: "$f3"}},
+	},
+	where: {
+		$f0: "1"
+	},
+	sort: [
+		"$f3"
+	],
+})
+
+
+// Manual fanout for post notifications.
+function createPost(db, post) {
+	db.set(post)
+	const follows = db.query({from: "follow", {where: {toId: post.authorId}}})
+	for (const follow of follows) {
+		db.set({type: "notification", postId: post.id, userId: follow.fromId, createdAt: post.id})
+	}
+}
+
+// Tags, complex indexing.
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+
 
 Is there any reason to have processAdHocJoin vs named joins? If its just about being terse, we could just query({from: schema.joins.namedJoin }) right?
 I'm not seeing any tests that use just the joinName as the target. Seems like it could also conflict with record type names too.
@@ -92,10 +390,7 @@ Can you think of some examples of a three-way join? I'm imagining a discovery fe
 
 How to handle indexing properties that should fanout like lists of tags, etc. And what about nested values, using dot-paths.
 
-
-
 ---
-
 
 
 discovery feed: posts by follows of follows.

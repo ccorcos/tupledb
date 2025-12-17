@@ -244,3 +244,44 @@ We can have a separate function called processIndexScan for querying over a name
 
 ---
 
+I want to add the following functions to make this a little more usable for me.
+
+isAmbiguousIndex(query) // Is this query an unambiguous query definition? Useful for developered debugging.
+toUnambiguousIndex(query) // Will sort where keys and creates an unambiguous index definition that we'll use if we cant find a matching index.
+
+ensureRecordIndex should be factored a bit more. It calls `hasIndex(query)` to check if it has an index. If not, it will call `createIndex(query)` (which calls `toUnambiguousIndex`). We should also have a function for `deleteIndex(query)`.
+
+This should be consistent with aggregation and join indexes as well. I'm not sure the best way to do it. Perhaps the Query type should be a union type so we if its a RecordQuery | AggregationQuery | JoinQuery. That wouuld mean we could have things like hasAggregationQuery, deleteJoinIndex, etc.). Or maybe it we have that but it still makes sense to expose a unified interfac to the developer for `createIndex` as upposed to `createJoinIndex` and `createAggregationIndex`.
+
+
+---
+
+
+
+Code cleanup...
+
+There's too much unnecessary recursion where the code recurses but passed down an entirely different branch. We should do this with recursion. What would you say to define this pattern more generally about how to code?
+- createIndex -> createWhateverIndex
+- backfillIndex -> backfillWhateverIndex and pass the def.
+
+Example.
+
+- createIndex(joinQuery)
+	- ensureRecordIndex(recordQuery)
+		- createIndex(recordQuery)
+			- backfillIndex(recordQueryName)
+			- saveIndex(recordQuery)
+- backfillIndex(joinQueryName)
+- saveIndex(joinQuery)
+
+This should look more like. No recursion!
+
+- createIndex(joinQuery)
+	- createJoinIndex(joinQuery)
+		- ensureRecordIndex(recordQuery)
+			- createRecordIndex(recordQuery)
+				- backfillRecordIndex(recordQuery)
+				- saveRecordIndex(recordQuery)
+- backfillJoinIndex(joinQuery)
+- saveJoinIndex(joinQuery)
+

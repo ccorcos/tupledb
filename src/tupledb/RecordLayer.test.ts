@@ -1,6 +1,15 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { JoinSchema, recordDb, Schema } from "./RecordLayer"
+import {
+	createIndex,
+	deleteIndex,
+	hasIndex,
+	isAmbiguousIndex,
+	JoinSchema,
+	recordDb,
+	Schema,
+	toUnambiguousIndex,
+} from "./RecordLayer"
 import { tupleDb } from "./TupleDb"
 
 // Define the types
@@ -17,6 +26,71 @@ const schema: Schema = {
 	},
 	indexes: {},
 }
+
+describe("RecordLayer Refactor New API", () => {
+	it("should detect ambiguous queries", () => {
+		// Sorted keys -> unambiguous
+		assert.equal(isAmbiguousIndex({ from: "user", where: { a: 1, b: 2 } }), false)
+		// Unsorted keys (simulated by manual object construction order? JS sort order for small strings is usually predictable,
+		// but keys insertion order is usually preserved.
+		// Let's create an object where keys are NOT sorted alphabetically)
+		const q = { from: "user", where: { b: 2, a: 1 } }
+		// keys are ["b", "a"]. sorted is ["a", "b"].
+		assert.equal(isAmbiguousIndex(q), true)
+	})
+
+	it("should convert to unambiguous index definition", () => {
+		const q = { from: "user", where: { b: 2, a: 1 }, sort: ["c"] }
+		const def = toUnambiguousIndex(q)
+		// sort keys should be union(["a", "b"], ["c"]) -> ["a", "b", "c"]
+		assert.deepEqual(def.sort, ["a", "b", "c"])
+		assert.equal(def.from, "user")
+		assert.deepEqual(def.where, { b: 2, a: 1 })
+	})
+
+	it("should check for existing index with hasIndex", () => {
+		const db = tupleDb()
+		const s = { ...schema }
+		// No index initially
+		assert.equal(hasIndex(s, { from: "user", where: { name: "Alice" } }), false)
+
+		// Create one manually in schema to test logic
+		s.indexes["idx_user_name"] = { from: "user", sort: ["name"] }
+
+		// Should match suitable index
+		// Query needs index on "name". Existing index starts with "name" + PK.
+		// "name" is in sort.
+		assert.equal(hasIndex(s, { from: "user", where: { name: "Alice" } }), "idx_user_name")
+	})
+
+	it("should create and delete index explicitly", () => {
+		const db = tupleDb()
+		const layer = recordDb(db, schema)
+		let currentSchema = schema // RecordDb manages internal schema, but createIndex returns new Schema
+
+		// We need to use loadSchema pattern if we want to see effects in `layer`.
+		// But createIndex writes to DB.
+		// Let's use createIndex standalone.
+
+		const q = { from: "user", where: { name: "Alice" } }
+
+		// Create
+		const res = createIndex(db, currentSchema, q)
+		assert.ok(res.indexName.startsWith("auto_idx_user_"))
+		assert.ok(res.schema.indexes[res.indexName])
+
+		// Verify DB has index def
+		const storedDef = db.get(["_schema", "indexes", res.indexName])
+		assert.ok(storedDef)
+
+		// Delete
+		const schemaAfterDelete = deleteIndex(db, res.schema, q)
+		assert.strictEqual(schemaAfterDelete.indexes[res.indexName], undefined)
+
+		// Verify DB index def gone
+		assert.strictEqual(db.get(["_schema", "indexes", res.indexName]), undefined)
+	})
+})
 
 describe("RecordLayer", () => {
 	const db = tupleDb()
