@@ -1,16 +1,14 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
 import {
-	createIndex,
-	deleteIndex,
-	hasIndex,
 	isAmbiguousIndex,
 	JoinSchema,
 	recordDb,
 	Schema,
 	toUnambiguousIndex,
 } from "./RecordLayer"
-import { tupleDb } from "./TupleDb"
+import { tupleDb, tupleTx } from "./TupleDb"
+import { TupleDb } from "./types"
 
 // Define the types
 type User = { type: "user"; id: string; name: string; bio: string }
@@ -26,6 +24,66 @@ const schema: Schema = {
 	},
 	indexes: {},
 }
+
+function setupSchema(db: TupleDb, schema: Schema) {
+	const layer = recordDb(db)
+	for (const [name, def] of Object.entries(schema.types)) {
+		layer.createType(name, def)
+	}
+	for (const [name, def] of Object.entries(schema.indexes)) {
+		layer.createIndex(name, def)
+	}
+	return layer
+}
+
+describe("Social App", () => {
+	it("should work with the example code", () => {
+		const db = tupleDb()
+
+		// SCHEMA block simulation
+		{
+			const tx = tupleTx(db)
+			const rdb = recordDb(tx)
+			rdb.createType("user", { primary: ["id"] })
+			rdb.createType("post", { primary: ["id"] })
+			rdb.createType("follow", { primary: ["fromId", "toId"] })
+			tx.commit()
+		}
+
+		const rdb = recordDb(db)
+
+		rdb.set({ type: "user", id: "u1", name: "Alice", bio: "Engineer" })
+		rdb.set({ type: "user", id: "u2", name: "Bob", bio: "Designer" })
+
+		rdb.set({
+			type: "post",
+			id: "p1",
+			authorId: "u1",
+			datetime: "2023-01-01",
+			body: "Hello, world!",
+		})
+
+		rdb.set({ type: "follow", fromId: "u1", toId: "u2", datetime: "2023-01-01" })
+
+		// Get a user
+		const user = rdb.get({ type: "user", id: "u1" })
+		assert.equal(user.name, "Alice")
+
+		// Get a follow
+		const follow = rdb.get({ type: "follow", fromId: "u1", toId: "u2" })
+		assert.equal(follow.datetime, "2023-01-01")
+
+		// Find users by name, this should create an index.
+		const bobs = rdb.query({ from: "user", where: { name: "Bob" } })
+		assert.equal(bobs.length, 1)
+		assert.equal(bobs[0].name, "Bob")
+
+		// Compound index
+		const bobDesigners = rdb.query({ from: "user", where: { name: "Bob", bio: "Designer" } })
+		assert.equal(bobDesigners.length, 1)
+		assert.equal(bobDesigners[0].id, "u2")
+	})
+})
 
 describe("RecordLayer Refactor New API", () => {
 	it("should detect ambiguous queries", () => {
@@ -49,52 +107,59 @@ describe("RecordLayer Refactor New API", () => {
 	})
 
 	it("should check for existing index with hasIndex", () => {
-		const db = tupleDb()
-		const s = { ...schema }
 		// No index initially
-		assert.equal(hasIndex(s, { from: "user", where: { name: "Alice" } }), false)
+		// We need to use layer methods now as hasIndex is private
+		const db = tupleDb()
+		const layer = setupSchema(db, schema)
+		
+		assert.equal(layer.hasIndex({ from: "user", where: { name: "Alice" } }), false)
 
-		// Create one manually in schema to test logic
-		s.indexes["idx_user_name"] = { from: "user", sort: ["name"] }
+		// Create one manually via layer
+		layer.createIndex("idx_user_name", { from: "user", sort: ["name"] })
 
 		// Should match suitable index
-		// Query needs index on "name". Existing index starts with "name" + PK.
-		// "name" is in sort.
-		assert.equal(hasIndex(s, { from: "user", where: { name: "Alice" } }), "idx_user_name")
+		assert.equal(layer.hasIndex({ from: "user", where: { name: "Alice" } }), "idx_user_name")
 	})
 
 	it("should create and delete index explicitly", () => {
 		const db = tupleDb()
-		const layer = recordDb(db, schema)
-		let currentSchema = schema // RecordDb manages internal schema, but createIndex returns new Schema
-
-		// We need to use loadSchema pattern if we want to see effects in `layer`.
-		// But createIndex writes to DB.
-		// Let's use createIndex standalone.
+		const layer = setupSchema(db, schema)
+		// RecordDb manages internal schema, but createIndex returns new Schema
+		// We can't see internal schema directly easily without loading it from DB or checking via layer methods.
 
 		const q = { from: "user", where: { name: "Alice" } }
 
-		// Create
-		const res = createIndex(db, currentSchema, q)
-		assert.ok(res.indexName.startsWith("auto_idx_user_"))
-		assert.ok(res.schema.indexes[res.indexName])
+		// We'll use a manual name since auto-name logic is internal
+		// BUT: deleteIndex(q) calculates the canonical name from q to find which index to delete.
+		// If we use a custom name, deleteIndex(q) won't find it.
+		// So we must use the proper canonical name if we want to use deleteIndex(q).
+		// Since we can't access getCanonicalIndexName, we rely on the fact that if we use createIndex with the correct structure, 
+		// we might need to know the name. 
+		// Actually, let's just let the system generate the name by using a query that triggers creation, 
+		// OR we just test layer.deleteIndex with a query, assuming we created it implicitly.
+		
+		// Let's rely on implicit creation via query, then explicit deletion.
+		layer.query(q)
+		const indexName = layer.hasIndex(q)
+		assert.ok(indexName)
+		assert.ok(typeof indexName === "string")
 
 		// Verify DB has index def
-		const storedDef = db.get(["_schema", "indexes", res.indexName])
+		const storedDef = db.get(["_schema", "indexes", indexName])
 		assert.ok(storedDef)
 
 		// Delete
-		const schemaAfterDelete = deleteIndex(db, res.schema, q)
-		assert.strictEqual(schemaAfterDelete.indexes[res.indexName], undefined)
+		layer.deleteIndex(q)
+		assert.equal(layer.hasIndex(q), false)
 
 		// Verify DB index def gone
-		assert.strictEqual(db.get(["_schema", "indexes", res.indexName]), undefined)
+		assert.strictEqual(db.get(["_schema", "indexes", indexName]), undefined)
 	})
 })
 
 describe("RecordLayer", () => {
 	const db = tupleDb()
-	const layer = recordDb(db, schema)
+	const layer = setupSchema(db, schema)
 
 	it("should insert and retrieve a user", () => {
 		const user: User = { type: "user", id: "u1", name: "Chet", bio: "Engineer" }
@@ -461,7 +526,7 @@ describe("RecordLayer Dynamic Query", () => {
 
 	it("should automatically create an index for a filtered query", () => {
 		const db = tupleDb()
-		const layer = recordDb(db, initialSchema)
+		const layer = setupSchema(db, initialSchema)
 
 		const i1: Item = { type: "item", id: "i1", name: "Apple", category: "Fruit", price: 1 }
 		const i2: Item = { type: "item", id: "i2", name: "Banana", category: "Fruit", price: 2 }
@@ -502,7 +567,7 @@ describe("RecordLayer Dynamic Query", () => {
 	it("should use the same index for {a, b} and {b, a} due to key sorting", () => {
 		type TestRec = { type: "test"; id: string; a: number; b: number }
 		const db = tupleDb()
-		const layer = recordDb(db, { types: { test: { primary: ["id"] } }, indexes: {} })
+		const layer = setupSchema(db, { types: { test: { primary: ["id"] } }, indexes: {} })
 
 		const r1: TestRec = { type: "test", id: "1", a: 1, b: 2 }
 		layer.set(r1)
@@ -532,7 +597,7 @@ describe("RecordLayer Dynamic Query", () => {
 	it("should reuse index for {where: {a, b}} if {sort: [b, a]} created one", () => {
 		type TestRec = { type: "test"; id: string; a: number; b: number }
 		const db = tupleDb()
-		const layer = recordDb(db, { types: { test: { primary: ["id"] } }, indexes: {} })
+		const layer = setupSchema(db, { types: { test: { primary: ["id"] } }, indexes: {} })
 
 		const r1: TestRec = { type: "test", id: "1", a: 1, b: 2 }
 		layer.set(r1)
@@ -563,7 +628,7 @@ describe("RecordLayer Dynamic Query", () => {
 
 	it("should automatically create an aggregation view", () => {
 		const db = tupleDb()
-		const layer = recordDb(db, initialSchema)
+		const layer = setupSchema(db, initialSchema)
 
 		const i1: Item = { type: "item", id: "i1", name: "A", category: "Fruit", price: 10 }
 		const i2: Item = { type: "item", id: "i2", name: "B", category: "Fruit", price: 20 }
@@ -631,7 +696,7 @@ describe("RecordLayer Scan & Aggregation", () => {
 	}
 
 	const db = tupleDb()
-	const layer = recordDb(db, schema)
+	const layer = setupSchema(db, schema)
 
 	it("should select the best index for scanning", () => {
 		const i1: Item = { type: "item", id: "i1", category: "A", price: 10, rating: 5 }
@@ -656,7 +721,7 @@ describe("RecordLayer Scan & Aggregation", () => {
 
 	it("should aggregate sum, min, max", () => {
 		const db = tupleDb()
-		const layer = recordDb(db, schema)
+		const layer = setupSchema(db, schema)
 		const i1: Item = { type: "item", id: "i1", category: "A", price: 10, rating: 5 }
 		const i2: Item = { type: "item", id: "i2", category: "A", price: 20, rating: 4 }
 		const i3: Item = { type: "item", id: "i3", category: "A", price: 5, rating: 3 }
@@ -704,7 +769,7 @@ describe("RecordLayer Sort", () => {
 	}
 
 	const db = tupleDb()
-	const layer = recordDb(db, schema)
+	const layer = setupSchema(db, schema)
 
 	it("should sort by existing index", () => {
 		const t1: Thing = { type: "thing", id: "t1", a: 10, b: 1 }

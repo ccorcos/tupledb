@@ -77,6 +77,10 @@ export type Change = {
 }
 
 export type RecordDb = {
+	createType: (name: string, def: TypeSchema) => void
+	createIndex: (name: string, def: IndexDefinition) => void
+	deleteIndex: (q: Query) => void
+	hasIndex: (q: Query) => string | false
 	get: (args: { type: string; [key: string]: any }) => any | undefined
 	delete: (args: { type: string; [key: string]: any }) => void
 	set: (record: { type: string; [key: string]: any }) => void
@@ -115,19 +119,6 @@ function saveIndex(db: TupleDb, name: string, def: IndexDefinition) {
 
 function deleteIndexDef(db: TupleDb, name: string) {
 	db.delete(["_schema", "indexes", name])
-}
-
-// Helper to initialize schema if empty
-function ensureSchema(db: TupleDb, initialSchema: Schema) {
-	const current = loadSchema(db)
-	if (Object.keys(current.types).length === 0 && Object.keys(current.indexes).length === 0) {
-		for (const [name, def] of Object.entries(initialSchema.types)) {
-			saveType(db, name, def)
-		}
-		for (const [name, def] of Object.entries(initialSchema.indexes)) {
-			saveIndex(db, name, def)
-		}
-	}
 }
 
 // ============================================================================
@@ -175,7 +166,7 @@ export function toUnambiguousIndex(q: Query): IndexDefinition {
 }
 
 // Check if a SUITABLE index exists
-export function hasIndex(schema: Schema, q: Query): string | false {
+function hasIndex(schema: Schema, q: Query): string | false {
 	if (isAggregationQuery(q)) {
 		const type = q.from
 		for (const [name, def] of Object.entries(schema.indexes)) {
@@ -225,28 +216,41 @@ export function hasIndex(schema: Schema, q: Query): string | false {
 	return false
 }
 
-export function createIndex(
+// ============================================================================
+// Index Creation
+// ============================================================================
+
+function createAutoIndex(
 	db: TupleDb,
 	schema: Schema,
 	q: Query
 ): { schema: Schema; indexName: string } {
-	if (isJoinQuery(q)) {
-		return createJoinIndex(db, schema, q)
+	const def = toUnambiguousIndex(q)
+	const indexName = getCanonicalIndexName(def)
+	return createIndex(db, schema, indexName, def)
+}
+
+function createIndex(
+	db: TupleDb,
+	schema: Schema,
+	indexName: string,
+	def: IndexDefinition
+): { schema: Schema; indexName: string } {
+	if (typeof def.from === "object") {
+		return createJoinIndex(db, schema, indexName, def)
 	}
-	if (isAggregationQuery(q)) {
-		return createAggregationIndex(db, schema, q)
+	if (def.aggregate) {
+		return createAggregationIndex(db, schema, indexName, def)
 	}
-	return createRecordIndex(db, schema, q)
+	return createRecordIndex(db, schema, indexName, def)
 }
 
 function createRecordIndex(
 	db: TupleDb,
 	schema: Schema,
-	q: RecordQuery
+	indexName: string,
+	def: IndexDefinition
 ): { schema: Schema; indexName: string } {
-	const def = toUnambiguousIndex(q)
-	const indexName = getCanonicalIndexName(def)
-
 	if (schema.indexes[indexName]) {
 		return { schema, indexName }
 	}
@@ -254,8 +258,8 @@ function createRecordIndex(
 	const newSchema = cloneDeep(schema)
 	newSchema.indexes[indexName] = def
 
-	backfillRecordIndex(db, newSchema, indexName)
 	saveIndex(db, indexName, def)
+	backfillRecordIndex(db, newSchema, indexName)
 
 	return { schema: newSchema, indexName }
 }
@@ -263,11 +267,9 @@ function createRecordIndex(
 function createAggregationIndex(
 	db: TupleDb,
 	schema: Schema,
-	q: AggregationQuery
+	indexName: string,
+	def: IndexDefinition
 ): { schema: Schema; indexName: string } {
-	const def = toUnambiguousIndex(q)
-	const indexName = getCanonicalIndexName(def)
-
 	if (schema.indexes[indexName]) {
 		return { schema, indexName }
 	}
@@ -275,8 +277,8 @@ function createAggregationIndex(
 	const newSchema = cloneDeep(schema)
 	newSchema.indexes[indexName] = def
 
-	backfillAggregationIndex(db, newSchema, indexName)
 	saveIndex(db, indexName, def)
+	backfillAggregationIndex(db, newSchema, indexName)
 
 	return { schema: newSchema, indexName }
 }
@@ -284,22 +286,30 @@ function createAggregationIndex(
 function createJoinIndex(
 	db: TupleDb,
 	schema: Schema,
-	q: JoinQuery
+	indexName: string,
+	def: IndexDefinition
 ): { schema: Schema; indexName: string } {
-	const def = toUnambiguousIndex(q)
-	const indexName = getCanonicalIndexName(def)
-
 	if (schema.indexes[indexName]) {
 		return { schema, indexName }
 	}
 
-	const newSchema = cloneDeep(schema)
+	let newSchema = cloneDeep(schema)
 	newSchema.indexes[indexName] = def
 
-	// For Join, we also need to ensure Record indexes on both sides
-	const joinDef = q.from as JoinSchema
+	saveIndex(db, indexName, def)
+
+	if (typeof def.from === "object") {
+		newSchema = ensureJoinDependencies(db, newSchema, def.from)
+	}
+
+	backfillJoinIndex(db, newSchema, indexName)
+
+	return { schema: newSchema, indexName }
+}
+
+function ensureJoinDependencies(db: TupleDb, schema: Schema, joinDef: JoinSchema): Schema {
 	// Ensure Left
-	const { schema: s1 } = ensureRecordIndex(db, newSchema, joinDef.left.type, {
+	const { schema: s1 } = ensureRecordIndex(db, schema, joinDef.left.type, {
 		from: joinDef.left.type,
 		sort: [joinDef.left.on],
 	})
@@ -308,15 +318,21 @@ function createJoinIndex(
 		from: joinDef.right.type,
 		sort: [joinDef.right.on],
 	})
-	Object.assign(newSchema, s2) // Merge back changes
-
-	backfillJoinIndex(db, newSchema, indexName)
-	saveIndex(db, indexName, def)
-
-	return { schema: newSchema, indexName }
+	return s2
 }
 
-export function deleteIndex(db: TupleDb, schema: Schema, q: Query): Schema {
+function backfillIndex(db: TupleDb, schema: Schema, indexName: string) {
+	const def = schema.indexes[indexName]
+	if (typeof def.from === "object") {
+		backfillJoinIndex(db, schema, indexName)
+	} else if (def.aggregate) {
+		backfillAggregationIndex(db, schema, indexName)
+	} else {
+		backfillRecordIndex(db, schema, indexName)
+	}
+}
+
+function deleteIndex(db: TupleDb, schema: Schema, q: Query): Schema {
 	const def = toUnambiguousIndex(q)
 	// Find the exact matching index.
 	// Note: hasIndex finds *suitable*, we want *exact* (or canonical name match)
@@ -512,7 +528,7 @@ function processAggregationQuery(db: TupleDb, schema: Schema, q: AggregationQuer
 	const existing = hasIndex(schema, q)
 	const { indexName, schema: newSchema } = existing
 		? { indexName: existing as string, schema }
-		: createAggregationIndex(db, schema, q)
+		: createAutoIndex(db, schema, q)
 
 	// Execute
 	const def = newSchema.indexes[indexName]
@@ -540,7 +556,7 @@ function processJoinQuery(db: TupleDb, schema: Schema, joinDef: JoinSchema, q: J
 	const existing = hasIndex(schema, q)
 	const { indexName, schema: updatedSchema } = existing
 		? { indexName: existing as string, schema }
-		: createJoinIndex(db, schema, q)
+		: createAutoIndex(db, schema, q)
 
 	return { schema: updatedSchema, result: processJoinScan(db, updatedSchema, indexName, q) }
 }
@@ -681,7 +697,7 @@ function ensureRecordIndex(
 	const existing = hasIndex(schema, q)
 	if (existing) return { schema, indexName: existing }
 
-	return createRecordIndex(db, schema, q)
+	return createAutoIndex(db, schema, q)
 }
 
 function backfillRecordIndex(db: TupleDb, schema: Schema, indexName: string) {
@@ -794,13 +810,26 @@ function makeListArgs(
 // RecordDb Factory
 // ============================================================================
 
-export function recordDb(db: TupleDb, initialSchema: Schema): RecordDb {
-	ensureSchema(db, initialSchema)
-
+export function recordDb(db: TupleDb): RecordDb {
 	// Helper to get fresh schema on every call
 	const getSchema = () => loadSchema(db)
 
 	return {
+		createType: (name, def) => {
+			saveType(db, name, def)
+		},
+		createIndex: (name, def) => {
+			const schema = getSchema()
+			createIndex(db, schema, name, def)
+		},
+		deleteIndex: (q) => {
+			const schema = getSchema()
+			deleteIndex(db, schema, q)
+		},
+		hasIndex: (q) => {
+			const schema = getSchema()
+			return hasIndex(schema, q)
+		},
 		get: (args) => {
 			const schema = getSchema()
 			// We need primary key def

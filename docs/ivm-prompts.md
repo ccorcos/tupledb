@@ -285,3 +285,158 @@ This should look more like. No recursion!
 - backfillJoinIndex(joinQuery)
 - saveJoinIndex(joinQuery)
 
+---
+
+
+I want to think through some improvements to the way Query works in @src/tupledb/RecordLayer.ts
+
+
+1. We need an ability to add comparisons.
+
+I'm thinking maybe we can adopt a mongoose-style syntax but I'm flexible and willing to consider whatever argument structure is more rigorous.
+
+```ts
+db.query({
+	from: "post",
+	where: {
+		author: "1234",
+		datetime: {$gte: "5678"},
+	},
+	limit: 10,
+	reverse: true,
+})
+```
+
+I can imagine running into issues where the query demands compound indexes with alternating sort directions.
+
+```ts
+db.query({
+	from: "x",
+	where: {
+		a: {$gte 1},
+		b: {$lte: 2},
+		c: {$gte: 3}
+	}
+})
+```
+
+We don't really a clean way of of doing that yet.  Perhaps `{sort: [{a: "asc"}, {b: "desc"}, {c: "asc"}]}`. But then in terms of the tupleDb and lexicodec, we'd need to investigate how to actually encode things or represent the in-memory comparison. This feels like a rabbithole. So lets investigate this and come up with some ideas.
+
+2. We need an ability to do unions and probably differences and unique.
+
+`db.query({from: "post", where: {tag: {$or: ["basketball", "soccer"]}}})`
+
+Is this easy to implement? I can imagine wanting to place the $or a level higher too. Come up with some realistic examples to consider and how we might solve it.
+
+3. Lets represent join queries as subqueries and introduce variables for matching.
+
+The `from` clause can be for named subqueries which can be used in `where` and `sort` later.
+
+So here are some ideas.
+
+```ts
+const fof = db.query({
+	from: {
+		a: {from: "follow", where: {toId: "$a"}},
+		b: {from: "follow", where: {fromId: "$a"}},
+	},
+	where: {
+		a: {fromId: "1"},
+	},
+	sort: [
+		{b: "toId"}
+	],
+})
+
+// Another way.
+const fof = db.query({
+	from: {
+		a: {from: "follow"},
+		b: {from: "follow"},
+	},
+	where: {
+		a: {toId: "$a"},
+		b: {fromId: "$a"},
+		a: {fromId: "1"},
+	},
+	sort: [
+		{b: "toId"}
+	],
+})
+
+// Another way with extra variables for easier comprehension.
+const fof = db.query({
+	from: {
+		a: {from: "follow", where: {fromId: "$user", toId: "$a"}},
+		b: {from: "follow", where: {fromId: "$a", toId: "$fof"}},
+	},
+	where: {
+		$user: "1",
+	},
+	sort: [
+		"$fof",
+	],
+})
+```
+
+Just to stress this abstraction a bit more, lets see how we can sort follows of follows based on the time in which the follow was made.
+
+```ts
+const fof = db.query({
+	from: {
+		a: {from: "follow", where: {fromId: "$user", toId: "$a", createdAt: "$t1"}},
+		b: {from: "follow", where: {fromId: "$a", toId: "$fof", createdAt: "$t2"}},
+	},
+	where: {
+		$user: "1",
+	},
+	sort: [
+		"$t1",
+		"$t2",
+	],
+	reverse: true
+})
+```
+
+Now we have a list of follows of follows in order similar to that which the network evolved.
+
+This new way of expression joins makes it possible to join n-ways too. For example, here's friends of friends of friends...
+
+```ts
+const fofof = db.query({
+	from: {
+		a: {from: "follow", where: {toId: "$f1", fromId: "$f0"}},
+		b: {from: "follow", where: {fromId: "$f1", toId: "$f2"}},
+		c: {from: "follow", where: {fromId: "$f2", toId: "$f3"}},
+	},
+	where: {
+		$f0: "1"
+	},
+})
+```
+
+The the index will need to contain f0, f1, f2, and f3. What we likely care about is just the unique set of follows though.
+
+```ts
+const fofof = db.query({
+	from: {
+		a: {from: "follow", where: {toId: "$f1", fromId: "$f0"}},
+		b: {from: "follow", where: {fromId: "$f1", toId: "$f2"}},
+		c: {from: "follow", where: {fromId: "$f2", toId: "$f3"}},
+	},
+	where: {
+		$f0: "1"
+	},
+	groupBy: ["$f1"],
+	aggregate: {$f3: "unique"}
+})
+```
+
+Now the question is how can we order this by createdAt time while still being unique and taking the earlier value. We might arbitrarily decide to take the latest value too -- I'm not sure the best way to represent this.
+
+In general, we need to support `unique` which I would assume is an aggregation. And we should probably support aggregations on join queries as well.
+
+
+Help me think through these ideas. In particular, explore what kinds of features we do not support that devs will likely need to build complex applications. Propose solutions. Think carefully about the syntax of the Query type as well. We want things to be general. One thing I don't love about variable syntax being just a string starting with $ is that it means you can't have values that start with $ and that's not great either.
+
+Write a plan into docs/query.md

@@ -11,152 +11,79 @@ Create branches to experiment with new layers and implementations...
 - deferred eventually consistent job updates or whatever queue.
 
 
----
-
-TODO: Multi-step refactoring prompt chain...
 
 
-
+@src/tupledb/RecordLayer.ts
 
 ---
 
-We need an ability to add comparisons.
-
-
 ```ts
-db.query({
-	from: "post",
-	where: {
-		author: 1,
-		datetime: {$gte: 1234},
-	},
-	limit: 10,
-	reverse: true,
+// Aggregation, count the number of designer by name
+const designerNameCounts = rdb.query({
+	from: "user",
+	where: { bio: "Designer" },
+	groupBy: ["name"],
+	aggregate: "count",
 })
+// Example output.
+// => {Bob: 1, Adam: 4}
+
+// Aggregation, sum the age of all designers
+const designersExperience = rdb.query({
+	from: "user",
+	where: { bio: "Designer" },
+	aggregate: {age: "sum"},
+})
+// Example output total years of experience.
+// => {age: 90}
+
 ```
 
-Are there compound indexes with alternating sorts that aren't possible with this approach?
 
-```ts
-db.query({from: "x", where: {a: {$gte 1}, b: {$lte: 2}, c: {$gte: 3}})
-```
 
-For now, lets just throw and error. But lets consider how we might do this
 
 ---
 
+This looks good, but lets simplify things a bit and break it up into phases. To start, we can get rid of compound sort indexes. That's just complicated and we can still get what we want from that if we require the data to be denormalized into a consistent lexicographical order with what you want to query. So that's fine.
 
-Lets change the way join queries are represented by introducing variables and subqueries.
+Phase 1: However, we still want to implement $gt, $gte, $le, and $lte. However since we don't have alternating indexes, we want to have some kind of query that is correct by construction. Something like {gte: {name: "A", date: "2020"}, lt: {name: "B"}} to specify ranges. And we need to think carefully about how these queries can be defines in a way that cannot construct an index and throw an error.
 
-The from clause is for named subqueries which can be used in where and sort later.
 
-So here are some ideas.
+Phase 2: I like new way of defining joins with variables. That feels important and works well. To handle issues of disambiguating
 
-```ts
-const fof = db.query({
-	from: {
-		a: {from: "follow", where: {toId: "$a"}},
-		b: {from: "follow", where: {fromId: "$a"}},
-	},
-	where: {
-		a: {fromId: "1"},
-	},
-	sort: [
-		{b: "toId"}
-	],
-})
+Phase 3:
 
-// Another way.
-const fof = db.query({
-	from: {
-		a: {from: "follow"},
-		b: {from: "follow"},
-	},
-	where: {
-		a: {toId: "$a"},
-		b: {fromId: "$a"},
-		a: {fromId: "1"},
-	},
-	sort: [
-		{b: "toId"}
-	],
-})
 
-// Another way with extra variables for easier comprehension.
-const fof = db.query({
-	from: {
-		a: {from: "follow", where: {fromId: "$user", toId: "$a"}},
-		b: {from: "follow", where: {fromId: "$a", toId: "$fof"}},
-	},
-	where: {
-		$user: "1",
-	},
-	sort: [
-		"$fof",
-	],
-})
-```
 
-Just to stress this abstraction a bit more, lets see how we can sort follows of follows based on the time in which the follow was made.
 
-```ts
-const fof = db.query({
-	from: {
-		a: {from: "follow", where: {fromId: "$user", toId: "$a", createdAt: "$t1"}},
-		b: {from: "follow", where: {fromId: "$a", toId: "$fof", createdAt: "$t2"}},
-	},
-	where: {
-		$user: "1",
-	},
-	sort: [
-		"$t1",
-		"$t2",
-	],
-	reverse: true
-})
-```
+No mix sort.
 
-Now we have a list of follows of follows in order similar to that which the network evolved.
+Or and not, we can do in one step
+
+gte, lte
+
+array in
+
+joins with variables
+
+unique aggregation, but then also scanning that index.
 
 ---
 
-This new way of expression joins makes it possible to join n-ways too. For example, here's friends of friends of friends...
+Lets obsess over the dev experience. What apps should I build and go from there.
+- journal log chat thing
+- comms messaging app
+- hey craft saas app
 
-```ts
-const fofof = db.query({
-	from: {
-		a: {from: "follow", where: {toId: "$f1", fromId: "$f0"}},
-		b: {from: "follow", where: {fromId: "$f1", toId: "$f2"}},
-		c: {from: "follow", where: {fromId: "$f2", toId: "$f3"}},
-	},
-	where: {
-		$f0: "1"
-	},
-})
-```
+- media feed
+- notion 3.0
+- html editor
+- p2p chat -> wiki -> airtable
+- ai stack
+- calendar
 
-The the index will need to contain f0, f1, f2, and f3. What we likely care about is just the unique set of follows though.
 
-```ts
-const fofof = db.query({
-	from: {
-		a: {from: "follow", where: {toId: "$f1", fromId: "$f0"}},
-		b: {from: "follow", where: {fromId: "$f1", toId: "$f2"}},
-		c: {from: "follow", where: {fromId: "$f2", toId: "$f3"}},
-	},
-	where: {
-		$f0: "1"
-	},
-	groupBy: ["$f1"],
-	aggregate: {$f3: "unique"}
-})
-```
 
-Now the question is how can we order this by createdAt time while still being unique and taking the earlier value...
-
-???
-
----
 
 
 Let assume posts can have an array of tags. Users want to sort their timelines based on tags. And a post can be viewed in any of those timelines. The notification should only appear once.
