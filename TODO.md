@@ -17,27 +17,11 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
-```ts
-// Aggregation, count the number of designer by name
-const designerNameCounts = rdb.query({
-	from: "user",
-	where: { bio: "Designer" },
-	groupBy: ["name"],
-	aggregate: "count",
-})
-// Example output.
-// => {Bob: 1, Adam: 4}
+Read @docs/query-syntax.md and the next evolution @docs/query-syntax-v2.md and help me think about a v3.
 
-// Aggregation, sum the age of all designers
-const designersExperience = rdb.query({
-	from: "user",
-	where: { bio: "Designer" },
-	aggregate: {age: "sum"},
-})
-// Example output total years of experience.
-// => {age: 90}
+Is there a systematic way of thinking about queries and their possibilities to iron out the syntax to make sure we're capable of doing anythign that we want? The set of query examples I have feels like a shot in the dark and we always find new ones that don't work.
 
-```
+Come up with a systematic approach and generate a set of queries that cover the whole surface area of possibilities that we could possibly care about indexing via IVM.
 
 
 
@@ -47,7 +31,6 @@ const designersExperience = rdb.query({
 This looks good, but lets simplify things a bit and break it up into phases. To start, we can get rid of compound sort indexes. That's just complicated and we can still get what we want from that if we require the data to be denormalized into a consistent lexicographical order with what you want to query. So that's fine.
 
 Phase 1: However, we still want to implement $gt, $gte, $le, and $lte. However since we don't have alternating indexes, we want to have some kind of query that is correct by construction. Something like {gte: {name: "A", date: "2020"}, lt: {name: "B"}} to specify ranges. And we need to think carefully about how these queries can be defines in a way that cannot construct an index and throw an error.
-
 
 Phase 2: I like new way of defining joins with variables. That feels important and works well. To handle issues of disambiguating
 

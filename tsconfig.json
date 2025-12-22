@@ -17,6 +17,7 @@
 		"removeComments": true,
 
 		"allowJs": true,
+		"jsx": "react-jsx",
 
 		"sourceMap": true,
 		"skipLibCheck": true,

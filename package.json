@@ -21,6 +21,7 @@
 		"lexicodec": "^0.0.6",
 		"lodash-es": "^4.17.21",
 		"md5": "^2.3.0",
+		"react": "^19.2.3",
 		"uuid": "^13.0.0"
 	},
 	"devDependencies": {
