@@ -527,3 +527,34 @@ index: ["f.fromId", "p.createdAt", "p.id"],
 
 - **NOTE:** These posts are inherently unique based on the the index key.
 
+---
+
+Not sure where I used this but I did
+
+
+
+record query:
+{from: "type", where: {a: 1, b: 2}, sort: ["c", "d"], gt: [1,2], lte: [3]}
+
+join index:
+{
+	bind: {a: "value"},
+	match: {
+		a: {from: "type", where: {a: "a", b: "var"}},
+		b: {from: "type", where: {a: "a", b: "var"}},
+	},
+	index: ["a.id", "b.id"]
+}
+
+aggregation index:
+{
+	[from or match]
+	groupBy: ["a", "b"],
+	reduce: {
+		aggregationName: {sum: "a.property"}
+	}
+	index: ["aggregationName", "a","b"]
+}
+
+---
+
