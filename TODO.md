@@ -2,8 +2,6 @@ Create branches to experiment with new layers and implementations...
 
 - schema + ivm layer https://gemini.google.com/app/c7c41f3ae35e0b64
 
-
-
 - syncable layer with version history and client side cache
 
 - pubsub integrated thing.
@@ -11,11 +9,54 @@ Create branches to experiment with new layers and implementations...
 - deferred eventually consistent job updates or whatever queue.
 
 
-
-
 @src/tupledb/RecordLayer.ts
 
 ---
+
+## SyncDb
+I want to build a simple way of syncing data between client and server. The idea is that anything that gets sync'd must have a logical clock, a history, and an okv. The history contains a set of operations (set, delete, update, insert, etc.) which modify the OKV. The server is the authority but the client should be able to optimistically update and work offline.
+
+The underlying implementation on both the client and the server is a set of types and functions for processing operations to write to the tupleDb. Importantly, when those operations are processed, we need to update the clock and history appropriately and enqueue dispatching an update for clients to trigger a sync.
+
+For example, this is what I want the developer experience to feel like when processing operations.
+
+function sendMessage(tx, message) {
+	for (const person of message.recipients)
+		syncDb(tx.subspace(["person", person])).set(["inbox", message.id], message)
+}
+
+On the client, we want to reuse much of the logic from @src/tupledb/Cache.test.ts to keep track of what ranges we've actualy read within each syncDb. We also need the reactivity layer, and need the ability to sync with the server to pull down new operations. After applying the operations on the client which should denormalize into the various indexes, we can prune out any writes to indexes that we aren't subscribed to.
+
+The client api should feel something like...
+
+```tsx
+const userDb = useSyncDb(db, ["user", id])
+const inbox = useList(userDb, ["inbox"], {gte: "2020-01-01", limit: 20})
+if (inbox.miss) return <div>loading</div>
+const messages = inbox.hit || inbox.prefix
+```
+
+And then to write, its a matter of pushing operations.
+
+```ts
+db.write({fn: "sendMessage", args: [{id, recipients, body}]})
+```
+
+We also need to be able to inspect history so we can render it and know whether or not the history is optimistic or has been successfully written to the server.
+
+
+---
+## durable datalog with differential dataflow on top of tupledb
+
+```ts
+const ddf = incrementalDb(db)
+
+
+```
+
+
+
+
 
 
 TODO:
@@ -24,7 +65,7 @@ TODO:
 
 Lots more IVM ideas here: https://gemini.google.com/app/b77e912889adc0a8
 
-from, map, filter, join, groupby, materialize | union, flatten (tag list), difference (except),
+from, map, filter, join, groupby, materialize union, flatten (tag list), difference (except),
 
 RecordDb direction...
 - based on v4, need to think more about syntax. Or generalization.

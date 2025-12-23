@@ -226,3 +226,135 @@ describe("TupleDB Query Syntax V5", () => {
 		assert.equal(res.length, 0)
 	})
 })
+
+describe("TupleDB Edge Cases & Complex Logic", () => {
+	it("should handle changing join keys (Moving a post)", () => {
+		const db = tupleDb()
+		const layer = setup(db)
+
+		layer.set({ type: "user", id: "u1", name: "A" })
+		layer.set({ type: "user", id: "u2", name: "B" })
+		layer.set({ type: "post", id: "p1", authorId: "u1", createdAt: "t1", body: "." })
+
+		// Query: Count posts per user
+		const q = {
+			match: {
+				u: { from: "user" },
+				p: { from: "post", on: { authorId: "u.id" } },
+			},
+			reduce: {
+				groupBy: ["u.id"],
+				aggregate: { count: { count: "p.id" } },
+			},
+			sort: ["u.id"],
+		}
+
+		// Initial State
+		let res = layer.query(q)
+		assert.equal(res.length, 1)
+		assert.equal(res[0]["u.id"], "u1")
+		assert.equal(res[0].count, 1)
+
+		// Move post to u2
+		layer.set({ type: "post", id: "p1", authorId: "u2", createdAt: "t1", body: "." })
+
+		res = layer.query(q)
+		assert.equal(res.length, 1)
+		assert.equal(res[0]["u.id"], "u2")
+		assert.equal(res[0].count, 1)
+	})
+
+	it("should handle changing sort keys", () => {
+		const db = tupleDb()
+		const layer = setup(db)
+
+		layer.set({ type: "user", id: "u1", name: "A", age: 10 })
+		
+		const q = {
+			match: { u: { from: "user" } },
+			sort: ["u.age", "u.id"],
+		}
+
+		let res = layer.query(q)
+		assert.equal(res[0]["u.age"], 10)
+
+		// Change age
+		layer.set({ type: "user", id: "u1", name: "A", age: 99 })
+		
+		res = layer.query(q)
+		assert.equal(res[0]["u.age"], 99)
+	})
+
+	it("should correctly maintain MAX aggregation with duplicates and deletions", () => {
+		const db = tupleDb()
+		const layer = setup(db)
+
+		layer.set({ type: "user", id: "u1", name: "A" })
+		
+		// 3 posts: 10, 20, 20
+		layer.set({ type: "post", id: "p1", authorId: "u1", createdAt: "10", body: "" })
+		layer.set({ type: "post", id: "p2", authorId: "u1", createdAt: "20", body: "" })
+		layer.set({ type: "post", id: "p3", authorId: "u1", createdAt: "20", body: "" })
+
+		const q = {
+			match: {
+				u: { from: "user" },
+				p: { from: "post", on: { authorId: "u.id" } },
+			},
+			reduce: {
+				groupBy: ["u.id"],
+				aggregate: { maxTime: { max: "p.createdAt" } },
+			},
+			sort: ["u.id"],
+		}
+
+		let res = layer.query(q)
+		assert.equal(res[0].maxTime, "20")
+
+		// Delete one 20 (p2)
+		layer.delete({ type: "post", id: "p2" })
+		res = layer.query(q)
+		assert.equal(res[0].maxTime, "20") // Should still be 20 from p3
+
+		// Delete other 20 (p3)
+		layer.delete({ type: "post", id: "p3" })
+		res = layer.query(q)
+		assert.equal(res[0].maxTime, "10") // Should drop to 10
+
+		// Delete 10 (p1)
+		layer.delete({ type: "post", id: "p1" })
+		res = layer.query(q)
+		// No posts left -> User has no joined rows -> Group disappears?
+		// Join is INNER JOIN logic. If no posts, no match.
+		// "p" depends on "u". If "p" has no match, the tuple (u, p) doesn't exist.
+		// So the group should disappear.
+		assert.equal(res.length, 0)
+	})
+
+	it("should handle orphan records (Joins failing)", () => {
+		const db = tupleDb()
+		const layer = setup(db)
+
+		// Post without User
+		layer.set({ type: "post", id: "p1", authorId: "missing", createdAt: "t1", body: "" })
+
+		const q = {
+			match: {
+				u: { from: "user" },
+				p: { from: "post", on: { authorId: "u.id" } },
+			},
+			sort: ["u.id", "p.id"],
+		}
+
+		const res = layer.query(q)
+		assert.equal(res.length, 0)
+
+		// Create user now
+		layer.set({ type: "user", id: "missing", name: "Found" })
+		
+		// Should appear now (Reactive join)
+		const res2 = layer.query(q)
+		assert.equal(res2.length, 1)
+		assert.equal(res2[0]["u.name"], "Found")
+	})
+})
