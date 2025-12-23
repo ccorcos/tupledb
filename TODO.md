@@ -17,11 +17,10 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
-Read @docs/query-syntax.md and the next evolution @docs/query-syntax-v2.md and help me think about a v3.
 
-Is there a systematic way of thinking about queries and their possibilities to iron out the syntax to make sure we're capable of doing anythign that we want? The set of query examples I have feels like a shot in the dark and we always find new ones that don't work.
-
-Come up with a systematic approach and generate a set of queries that cover the whole surface area of possibilities that we could possibly care about indexing via IVM.
+Some things to investigate...
+1. How should we handle variables and conditional indexes?
+2. How can we efficiently find lookup which indexes need to be updated. What if from is just a where{type} query?
 
 
 
