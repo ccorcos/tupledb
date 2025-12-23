@@ -18,9 +18,28 @@ Create branches to experiment with new layers and implementations...
 ---
 
 
-Some things to investigate...
-1. How should we handle variables and conditional indexes?
-2. How can we efficiently find lookup which indexes need to be updated. What if from is just a where{type} query?
+TODO:
+- Read the new RecordLayer. Read the tests. Expand tests probably. Make sure it works.
+- SyncDb abstraction and frontend layer.
+
+Lots more IVM ideas here: https://gemini.google.com/app/b77e912889adc0a8
+
+from, map, filter, join, groupby, materialize | union, flatten (tag list), difference (except),
+
+RecordDb direction...
+- based on v4, need to think more about syntax. Or generalization.
+- later
+	- conditional indexes?
+	- js string reducer functions?
+
+
+
+SyncDb direction
+- more general pattern of operations and sync.
+
+list of operations, write them to the database, query them, get upates from syncdb.
+
+
 
 
 

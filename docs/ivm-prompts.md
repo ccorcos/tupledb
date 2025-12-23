@@ -558,3 +558,4 @@ aggregation index:
 
 ---
 
+implement @docs/query-syntax-v5.md on @src/tupledb/RecordLayer.ts and update the tests in @src/tupledb/RecordLayer.test.ts and make sure to include the examples in v5.md as tests.

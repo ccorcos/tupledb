@@ -41,7 +41,7 @@ New features should generally be implemented as wrappers around `Okv` rather tha
 ### 3. Testing
 - we're using `node:test` and `node:assert` packages fopr testing.
 - to run a single file `npx tsx path/to/file.test.ts`
-- IMPORTANT: to run tests, use `npm test`
+- IMPORTANT: to run tests, use `npm test`. DO NOT USE vitest.
 - test files are co-located as `*.test.ts` files.
 - always check types to verify no type errors `npm run typecheck`.
 
