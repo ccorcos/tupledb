@@ -1,12 +1,12 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { syncable } from "./Syncable"
+import { syncDb } from "./SyncDb"
 import { tupleDb } from "./TupleDb"
 
 describe("Syncable", () => {
 	it("basic write tracking", () => {
 		const db = tupleDb()
-		const user = syncable(db)
+		const user = syncDb(db)
 
 		assert.equal(user.clock(), 0)
 
@@ -27,7 +27,7 @@ describe("Syncable", () => {
 
 	it("batch writes", () => {
 		const db = tupleDb()
-		const user = syncable(db)
+		const user = syncDb(db)
 
 		user.write({
 			set: [
@@ -52,7 +52,7 @@ describe("Syncable", () => {
 
 	it("subspaces share history", () => {
 		const db = tupleDb()
-		const user = syncable(db)
+		const user = syncDb(db)
 		const inbox = user.subspace(["inbox"])
 
 		inbox.set(["msg1"], "hello")
@@ -79,7 +79,7 @@ describe("Syncable", () => {
 
 	it("underlying db structure", () => {
 		const db = tupleDb()
-		const user = syncable(db)
+		const user = syncDb(db)
 
 		user.set(["a"], 1)
 

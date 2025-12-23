@@ -1,7 +1,7 @@
 import { KeyEncodeWrite, TupleSubspaceEncoder } from "./Encoder"
 import { JSONValue, ListArgs, Tuple, TupleDb, WriteArgs } from "./types"
 
-export type SyncableDb = {
+export type SyncDb = {
 	clock: () => number
 	history: (args?: ListArgs<Tuple>) => { key: Tuple; value: WriteArgs<Tuple, JSONValue> }[]
 
@@ -11,10 +11,10 @@ export type SyncableDb = {
 	get: (key: Tuple) => JSONValue | undefined
 	set: (key: Tuple, value: JSONValue) => void
 	delete: (key: Tuple) => void
-	subspace: (prefix: Tuple) => SyncableDb
+	subspace: (prefix: Tuple) => SyncDb
 }
 
-export function writeSyncable(db: TupleDb, args: WriteArgs<Tuple, JSONValue>) {
+export function writeSyncDb(db: TupleDb, args: WriteArgs<Tuple, JSONValue>) {
 	// 1. Get the current clock
 	const clock = (db.get(["clock"]) as number) ?? 0
 
@@ -30,7 +30,7 @@ export function writeSyncable(db: TupleDb, args: WriteArgs<Tuple, JSONValue>) {
 	dataSpace.write(args)
 }
 
-export function syncable(db: TupleDb): SyncableDb {
+export function syncDb(db: TupleDb): SyncDb {
 	const dataSpace = db.subspace(["data"])
 	const historySpace = db.subspace(["history"])
 
@@ -41,13 +41,13 @@ export function syncable(db: TupleDb): SyncableDb {
 			return historySpace.list(args) as { key: Tuple; value: WriteArgs<Tuple, JSONValue> }[]
 		},
 		write: (args) => {
-			writeSyncable(db, args)
+			writeSyncDb(db, args)
 		},
 		set: (key, value) => {
-			writeSyncable(db, { set: [{ key, value }] })
+			writeSyncDb(db, { set: [{ key, value }] })
 		},
 		delete: (key) => {
-			writeSyncable(db, { delete: [key] })
+			writeSyncDb(db, { delete: [key] })
 		},
 		get: (key) => dataSpace.get(key),
 		list: (args) => dataSpace.list(args),
@@ -73,12 +73,12 @@ export function syncable(db: TupleDb): SyncableDb {
 
 			// Let's implement a proxy that prefixes keys for the 'data' reads
 			// and prefixes keys for the 'write' calls.
-			return syncableSubspace(db, prefix)
+			return subspaceSyncDb(db, prefix)
 		},
 	}
 }
 
-function syncableSubspace(rootDb: TupleDb, prefix: Tuple): SyncableDb {
+function subspaceSyncDb(rootDb: TupleDb, prefix: Tuple): SyncDb {
 	const rootData = rootDb.subspace(["data"])
 	const subspaceData = rootData.subspace(prefix)
 	const encoder = TupleSubspaceEncoder(prefix)
@@ -98,16 +98,16 @@ function syncableSubspace(rootDb: TupleDb, prefix: Tuple): SyncableDb {
 		write: (args) => {
 			// We need to prefix the keys in args before sending to root writeSyncable
 			const prefixedArgs = KeyEncodeWrite(args, encoder)
-			writeSyncable(rootDb, prefixedArgs)
+			writeSyncDb(rootDb, prefixedArgs)
 		},
 		set: (key, value) => {
-			writeSyncable(rootDb, { set: [{ key: prepend(key), value }] })
+			writeSyncDb(rootDb, { set: [{ key: prepend(key), value }] })
 		},
 		delete: (key) => {
-			writeSyncable(rootDb, { delete: [prepend(key)] })
+			writeSyncDb(rootDb, { delete: [prepend(key)] })
 		},
 		get: (key) => subspaceData.get(key),
 		list: (args) => subspaceData.list(args),
-		subspace: (nestedPrefix) => syncableSubspace(rootDb, [...prefix, ...nestedPrefix]),
+		subspace: (nestedPrefix) => subspaceSyncDb(rootDb, [...prefix, ...nestedPrefix]),
 	}
 }
