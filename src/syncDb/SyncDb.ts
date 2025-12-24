@@ -1,5 +1,5 @@
-import { randomId } from "../../shared/randomId"
-import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb } from "../types"
+import { randomId } from "../shared/randomId"
+import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb } from "../tupledb/types"
 import { Commit, SyncDb, ReducerMap, WriteSyncDb } from "./types"
 
 // Default reducers

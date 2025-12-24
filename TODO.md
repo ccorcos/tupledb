@@ -22,11 +22,21 @@ SyncDb direction
 list of operations, write them to the database, query them, get upates from syncdb.
 
 
-write my own test examples.
 move syncdb into src
 move recordb into src as well
 
-simple vite app with react for querying.
+
+help me rename src/tupledb to src/tupleDb where the capital D matters. I know this can be tricky with git and unix systems.
+
+
+
+
+
+write my own test examples.
+
+create simple vite app with react for querying.
+
+
 
 
 

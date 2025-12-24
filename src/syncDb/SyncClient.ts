@@ -1,8 +1,8 @@
-import { Cache } from "../Cache"
-import { TupleDb, TupleTx, WriteArgs, ListArgs, Tuple } from "../types"
+import { Cache } from "../tupledb/Cache"
+import { TupleDb, TupleTx, WriteArgs, ListArgs, Tuple } from "../tupledb/types"
 import { defaultReducers } from "./SyncDb"
 import { SyncManagerConfig, Commit, Op, WriteResult, ReducerMap } from "./types"
-import { randomId } from "../../shared/randomId"
+import { randomId } from "../shared/randomId"
 
 export type { SyncManagerConfig } from "./types"
 

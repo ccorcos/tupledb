@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
 import { recordDb, Schema } from "./RecordLayer"
-import { tupleDb } from "./TupleDb"
-import { TupleDb } from "./types"
+import { tupleDb } from "../tupledb/TupleDb"
+import { TupleDb } from "../tupledb/types"
 
 // Types for the social app
 type User = { type: "user"; id: string; name: string; age?: number; bio?: string }

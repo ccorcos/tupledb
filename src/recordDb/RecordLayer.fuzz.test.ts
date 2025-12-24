@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
 import { recordDb, Schema, Query } from "./RecordLayer"
-import { tupleDb } from "./TupleDb"
+import { tupleDb } from "../tupledb/TupleDb"
 
 // --- Helper for Ground Truth ---
 type User = { type: "user"; id: string; name: string; age?: number }
