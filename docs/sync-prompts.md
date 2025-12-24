@@ -191,3 +191,26 @@ On the client, we can use those same reducers for optimistic writes and processi
 
 ---
 
+Now for the syncDb read path...
+
+The client needs to support "partial sync". And what I mean by this is the client doesnt need to maintain the entire history and the entire subspace of a syncDb in order to work.
+
+In our example we've been running with, a user's syncDb has the following layout in the tupleDb:
+
+```ts
+["user", id, "clock"]: number
+["user", id, "history", clock]: Transaction
+["user", id, "data"]: User
+["user", id, "data", "sent", datetime, id]: Message
+["user", id, "data", "inbox", datetime, id]: Message
+```
+
+A user should be able to query only a partial set of this data. For example, the first 10 messages in their inbox, or some arbitrary range of history (not for sync but just to view a log of edits).
+
+When the user reads this data from inside a syncDb like this though, we need to make sure that the cache is consistent. Imagine a situation where the client cache is on clock 20 with 5 optimistic writes on top. And the server is on clock 30. When the user reads from the server range, the client needs to first write those 10 updates, the commit the range that was read into the cache, and the run the 5 optimistic writes on top... Somethign like that needs to happen so that we maintain a valid cache state that will be eventually consistent.
+
+So to reiterate, the client cache definitely needs to know the server clock for syncing. But it doesnt need the entire history and entire data subspaces. It can read various ranges of either the data or history subspace for the take of rendering. It maintains optimistic history writes, clock, and data on top of the known synced values from the server. And it keeps track of what ranges are actually in the cache. And when we sync and writes come in from history, we will apply those to the cache while also discarding and writes that end up outside of the ranges that we're currently keeping around to look at. This goes along with our cache invalidation strategy that removes data from ranges we're no longer subscribed to on the client. And it would be prudent to unsubscribe with a 1m delay in case we re-subscribe to those ranges.
+
+Note that there are two different concepts of subscription now.
+1. The browser client can subscribe to a syncDb clock/history subspace. This simply listens for a clock update and pulls down history to apply it locally.
+2. Inside the browser client is a cache with data ranges and the react components can subscribe to various data ranges that get fetched fom the server if they aren't there. And when data changes in those ranges, those components update. One day we'll optimize this reactivity model with an interval tree.

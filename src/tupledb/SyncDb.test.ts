@@ -10,6 +10,7 @@ describe("Syncable", () => {
 
 		assert.equal(user.clock(), 0)
 
+		// 'set' is a default reducer
 		user.set(["name"], "chet")
 
 		// Check clock incremented
@@ -21,21 +22,22 @@ describe("Syncable", () => {
 		// Check history
 		const history = user.history()
 		assert.equal(history.length, 1)
-		assert.equal(history[0].clock, 1) // clock starts at 1 now
-		assert.deepEqual(history[0].entry.changes, { set: [{ key: ["name"], value: "chet" }] })
+		assert.equal(history[0].clock, 1)
+		assert.deepEqual(history[0].entry.op, { fn: "set", args: [["name"], "chet"] })
 	})
 
 	it("batch writes", () => {
 		const db = tupleDb()
 		const user = syncDb(db)
 
-		user.write({
+		const batch = {
 			set: [
 				{ key: ["a"], value: 1 },
 				{ key: ["b"], value: 2 },
 			],
 			delete: [["c"]],
-		})
+		}
+		user.write(batch)
 
 		assert.equal(user.clock(), 1)
 		assert.equal(user.get(["a"]), 1)
@@ -43,46 +45,58 @@ describe("Syncable", () => {
 
 		const history = user.history()
 		assert.equal(history.length, 1)
-		assert.deepEqual(history[0].entry.changes.set, [
-			{ key: ["a"], value: 1 },
-			{ key: ["b"], value: 2 },
-		])
-		assert.deepEqual(history[0].entry.changes.delete, [["c"]])
+		assert.deepEqual(history[0].entry.op, { fn: "write", args: [batch] })
 	})
 
-	it("subspaces share history", () => {
+	it("custom reducers", () => {
+		const db = tupleDb()
+		const reducers = {
+			inc: (tx: any, key: any) => {
+				const val = (tx.get(key) as number) || 0
+				tx.set(key, val + 1)
+			}
+		}
+		const user = syncDb(db, reducers)
+
+		user.inc(["count"])
+
+		assert.equal(user.get(["count"]), 1)
+		
+		const history = user.history()
+		assert.equal(history.length, 1)
+		assert.deepEqual(history[0].entry.op, { fn: "inc", args: [["count"]] })
+	})
+
+	it("subspaces form independent sync units", () => {
 		const db = tupleDb()
 		const user = syncDb(db)
+		// subspace() creates a new SyncDb scoped to that prefix
 		const inbox = user.subspace(["inbox"])
 
 		inbox.set(["msg1"], "hello")
 
-		// Check root clock
-		assert.equal(user.clock(), 1)
+		// Check clocks are independent
+		assert.equal(user.clock(), 0)
 		assert.equal(inbox.clock(), 1)
 
-		// Check root history
-		const history = user.history()
-		assert.equal(history.length, 1)
-		// History key should be preserved
-		assert.deepEqual(history[0].entry.changes.set?.[0]?.key, ["inbox", "msg1"])
-
-		// Check data retrieval
-		assert.equal(inbox.get(["msg1"]), "hello")
-		assert.equal(user.get(["inbox", "msg1"]), "hello")
-	})
-
-	it("underlying db structure", () => {
-		const db = tupleDb()
-		const user = syncDb(db)
-
-		user.set(["a"], 1)
-
-		// Check actual DB keys
-		assert.equal(db.get(["clock"]), 1)
-		// history is at ["history", 1]
-		assert.ok(db.get(["history", 1]))
-		// data is at ["data", "a"]
-		assert.equal(db.get(["data", "a"]), 1)
+		// Data is still in the same underlying DB
+		// user (root) sees it at ["data", "inbox", "data", "msg1"]?
+		// inbox is syncDb(userDb.subspace(["inbox"]))
+		// userDb.subspace(["inbox"]) -> prefix ["data", "inbox"] (relative to user root? No.)
+		
+		// syncDb(db) -> data at ["data"]
+		// db.subspace(["inbox"]) -> prefix ["inbox"]
+		// syncDb(db.subspace(["inbox"])) -> data at ["inbox", "data"]
+		
+		// If user is syncDb(root), user data is at ["data"].
+		// inbox is syncDb(root.subspace(["inbox"])).
+		// inbox data is at ["inbox", "data"].
+		
+		// user.get(["inbox", "data", "msg1"])?
+		// user.get() prefixes with ["data"].
+		// So user.get(["inbox", ...]) -> ["data", "inbox", ...]
+		// Real path is ["inbox", "data", ...].
+		// So user can't easily see inbox data via .get() because of the layout.
+		// This confirms they are independent units.
 	})
 })

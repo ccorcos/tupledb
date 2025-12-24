@@ -23,10 +23,7 @@ describe("SyncDb", () => {
 	it("syncs between client and server", async () => {
 		const serverDb = tupleDb()
 		const reducers = {
-			sendMessage: (tx: any, msg: any) => {
-				// Reducer must use SyncDb to ensure writes are tracked
-				// We assume 'tx' is the context-aware transaction
-				const db = syncDb(tx.subspace(["user", msg.fromId]))
+			sendMessage: (db: any, msg: any) => {
 				db.set(["inbox", msg.id], msg)
 			},
 		}
@@ -64,6 +61,9 @@ describe("SyncDb", () => {
 
 		// Verify applied to Server (at subspace)
 		// Server DB should have: `["user", 1, "data", "inbox", "msg1"]`
+		// The server creates a SyncDb at `["user", 1]`.
+		// It writes to `["data", "inbox", "msg1"]` relative to that.
+		// So `["user", 1, "data", "inbox", "msg1"]`.
 		const serverKey = ["user", 1, "data", "inbox", "msg1"]
 		const serverHit = serverDb
 			.list()
@@ -84,14 +84,13 @@ describe("SyncDb", () => {
 		const msg2 = { id: "msg2", fromId: 1, text: "world" }
 		
 		// Simulate another client pushing
-		// We can just call server.push directly
+		const metadata = { txId: "op2", timestamp: Date.now() }
 		server.push(["user", 1], {
-			ops: [{ id: "op2", fn: "sendMessage", args: [msg2], timestamp: Date.now() }],
+			ops: [{ metadata, op: { fn: "sendMessage", args: [msg2] } }],
 			syncedClock: 0,
 		})
 
 		// Client syncs again (triggered by new dispatch or manually)
-		// We trigger a manual sync or dispatch something to force sync
 		session.dispatch("sendMessage", { id: "trigger", fromId: 1, text: "force sync" })
 		await new Promise((resolve) => setTimeout(resolve, 50))
 
@@ -106,10 +105,7 @@ describe("SyncDb", () => {
 	it("handles multiple sessions", async () => {
 		const serverDb = tupleDb()
 		const reducers = {
-			write: (tx: any, k: any, v: any, userId: number) => {
-				const db = syncDb(tx.subspace(["user", userId]))
-				db.set(k, v)
-			}
+			write: (db: any, k: any, v: any) => db.set(k, v)
 		}
 		const server = new SyncServer(serverDb, reducers)
 		const transport = createTransport(server)
@@ -123,8 +119,8 @@ describe("SyncDb", () => {
 		const sess1 = manager.session(["user", 1])
 		const sess2 = manager.session(["user", 2])
 
-		sess1.dispatch("write", ["val"], 1, 1)
-		sess2.dispatch("write", ["val"], 2, 2)
+		sess1.dispatch("write", ["val"], 1)
+		sess2.dispatch("write", ["val"], 2)
 
 		await new Promise((r) => setTimeout(r, 50))
 
