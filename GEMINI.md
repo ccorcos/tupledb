@@ -10,7 +10,8 @@ The system is built as a stack of layers implementing the `Okv<K, V>` interface:
   * `InMemoryOkv` (`src/tupledb/InMemoryOkv.ts`): Uses a sorted array (`OrderedList`) for storage. Fast, supports rich types.
   * `SQLiteOkv` (`src/tupledb/SQLiteOkv.ts`): Persists to SQLite. Keys/Values are strings.
 
-2. Encoding Layer (Middle)
+2. Encoding Layer (Middle)@src/tupledb/SyncDb.ts @src/tupledb/sync/
+
   * Wrappers in `src/tupledb/Encoder.ts` (`KeyEncodeOKV`, `ValueEncodeOKV`) transform keys/values.
   * Subspaces: Implemented via `TupleSubspaceEncoder`. A subspace is just a prefix-encoded view of the underlying DB.
   * Codec: `src/tupledb/Codec.ts` handles tuple serialization (`["users", 1] -> "users\x00\x01..."`).
@@ -41,7 +42,7 @@ New features should generally be implemented as wrappers around `Okv` rather tha
 ### 3. Testing
 - we're using `node:test` and `node:assert` packages fopr testing.
 - to run a single file `npx tsx path/to/file.test.ts`
-- IMPORTANT: to run tests, use `npm test`. DO NOT USE vitest.
+- IMPORTANT: to run tests, use `npm test`.
 - test files are co-located as `*.test.ts` files.
 - always check types to verify no type errors `npm run typecheck`.
 

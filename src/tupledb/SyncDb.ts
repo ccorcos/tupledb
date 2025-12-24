@@ -1,78 +1,80 @@
 import { KeyEncodeWrite, TupleSubspaceEncoder } from "./Encoder"
 import { JSONValue, ListArgs, Tuple, TupleDb, WriteArgs } from "./types"
 
+export type SyncMetadata = {
+	txId?: string
+	authorId?: string
+	timestamp?: number
+}
+
+export type SyncHistoryEntry = {
+	metadata: SyncMetadata
+	changes: WriteArgs<Tuple, JSONValue>
+}
+
 export type SyncDb = {
 	clock: () => number
-	history: (args?: ListArgs<Tuple>) => { key: Tuple; value: WriteArgs<Tuple, JSONValue> }[]
+	history: (since?: number, limit?: number) => { clock: number; entry: SyncHistoryEntry }[]
 
 	list: (args?: ListArgs<Tuple>) => { key: Tuple; value: JSONValue }[]
-	write: (args: WriteArgs<Tuple, JSONValue>) => void
+	write: (changes: WriteArgs<Tuple, JSONValue>, metadata?: SyncMetadata) => void
 
 	get: (key: Tuple) => JSONValue | undefined
-	set: (key: Tuple, value: JSONValue) => void
-	delete: (key: Tuple) => void
+	set: (key: Tuple, value: JSONValue, metadata?: SyncMetadata) => void
+	delete: (key: Tuple, metadata?: SyncMetadata) => void
 	subspace: (prefix: Tuple) => SyncDb
 }
 
-export function writeSyncDb(db: TupleDb, args: WriteArgs<Tuple, JSONValue>) {
+export function writeSyncDb(
+	db: TupleDb,
+	changes: WriteArgs<Tuple, JSONValue>,
+	metadata: SyncMetadata = {}
+) {
 	// 1. Get the current clock
 	const clock = (db.get(["clock"]) as number) ?? 0
 
 	// 2. Write the operation to the history log
-	// We store the whole batch as the value.
-	db.set(["history", clock], args)
+	const entry: SyncHistoryEntry = {
+		metadata,
+		changes,
+	}
+	db.set(["history", clock + 1], entry)
 
 	// 3. Increment the clock
 	db.set(["clock"], clock + 1)
 
 	// 4. Apply writes to the "data" subspace
 	const dataSpace = db.subspace(["data"])
-	dataSpace.write(args)
+	dataSpace.write(changes)
 }
 
 export function syncDb(db: TupleDb): SyncDb {
 	const dataSpace = db.subspace(["data"])
 	const historySpace = db.subspace(["history"])
+	const defaultMetadata = (db as any).syncMetadata || {}
 
 	return {
 		clock: () => (db.get(["clock"]) as number) ?? 0,
-		history: (args) => {
-			// Start query from the history subspace
-			return historySpace.list(args) as { key: Tuple; value: WriteArgs<Tuple, JSONValue> }[]
+		history: (since = 0, limit) => {
+			// List history after 'since'
+			const entries = historySpace.list({ gt: [since], limit })
+			return entries.map(({ key, value }) => ({
+				clock: key[0] as number,
+				entry: value as SyncHistoryEntry,
+			}))
 		},
-		write: (args) => {
-			writeSyncDb(db, args)
+		write: (changes, metadata) => {
+			writeSyncDb(db, changes, { ...defaultMetadata, ...metadata })
 		},
-		set: (key, value) => {
-			writeSyncDb(db, { set: [{ key, value }] })
+		set: (key, value, metadata) => {
+			writeSyncDb(db, { set: [{ key, value }] }, { ...defaultMetadata, ...metadata })
 		},
-		delete: (key) => {
-			writeSyncDb(db, { delete: [key] })
+		delete: (key, metadata) => {
+			writeSyncDb(db, { delete: [key] }, { ...defaultMetadata, ...metadata })
 		},
 		get: (key) => dataSpace.get(key),
 		list: (args) => dataSpace.list(args),
 		subspace: (prefix) => {
-			// When creating a subspace of a syncable, we are essentially
-			// creating a syncable view of a subset of the data.
-			// However, 'syncable' expects a DB that has [clock, history, data].
-			// If we subspace 'data', we lose the clock and history context.
-
-			// If the user wants a nested syncable object (e.g. distinct history),
-			// they should pass a db subspace to `syncable()`.
-
-			// If they want a convenience wrapper for reading/writing deep keys
-			// BUT sharing the same history/clock as the parent, we need to handle that.
-
-			// For now, let's assume 'subspace' returns a wrapper that forwards
-			// writes to the parent 'writeSyncable' but with prefixed keys.
-
-			// Actually, to keep it simple and avoid complexity:
-			// Let's defer recursive subspacing unless strict requirements arise.
-			// But 'TupleDb' requires 'subspace' to return a 'TupleDb'.
-			// 'SyncableDb' is not exactly 'TupleDb'.
-
-			// Let's implement a proxy that prefixes keys for the 'data' reads
-			// and prefixes keys for the 'write' calls.
 			return subspaceSyncDb(db, prefix)
 		},
 	}
@@ -88,23 +90,22 @@ function subspaceSyncDb(rootDb: TupleDb, prefix: Tuple): SyncDb {
 
 	return {
 		clock: () => (rootDb.get(["clock"]) as number) ?? 0,
-		history: (args) => {
-			// This is tricky. Do we filter history for just this subspace?
-			// The current simple implementation logs all writes to the root history.
-			// Filtering would require inspecting the values in history.
-			// For now, return global history (maybe not ideal but simpler).
-			return rootDb.subspace(["history"]).list(args) as any
+		history: (since, limit) => {
+			// Returns GLOBAL history.
+			// Ideally we could filter for changes affecting this subspace,
+			// but for now we return the root history.
+			return syncDb(rootDb).history(since, limit)
 		},
-		write: (args) => {
-			// We need to prefix the keys in args before sending to root writeSyncable
-			const prefixedArgs = KeyEncodeWrite(args, encoder)
-			writeSyncDb(rootDb, prefixedArgs)
+		write: (changes, metadata) => {
+			// Prefix the keys
+			const prefixedChanges = KeyEncodeWrite(changes, encoder)
+			writeSyncDb(rootDb, prefixedChanges, metadata)
 		},
-		set: (key, value) => {
-			writeSyncDb(rootDb, { set: [{ key: prepend(key), value }] })
+		set: (key, value, metadata) => {
+			writeSyncDb(rootDb, { set: [{ key: prepend(key), value }] }, metadata)
 		},
-		delete: (key) => {
-			writeSyncDb(rootDb, { delete: [prepend(key)] })
+		delete: (key, metadata) => {
+			writeSyncDb(rootDb, { delete: [prepend(key)] }, metadata)
 		},
 		get: (key) => subspaceData.get(key),
 		list: (args) => subspaceData.list(args),

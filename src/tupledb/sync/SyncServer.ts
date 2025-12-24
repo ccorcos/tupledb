@@ -1,5 +1,6 @@
 import { tupleTx } from "../TupleDb"
-import { TupleDb } from "../types"
+import { TupleDb, Tuple } from "../types"
+import { syncDb } from "../SyncDb"
 import { Operation, ReducerMap, SyncPushRequest, SyncPushResponse } from "./types"
 
 export class SyncServer {
@@ -8,25 +9,19 @@ export class SyncServer {
 		public reducers: ReducerMap
 	) {}
 
-	getClock(): number {
-		return (this.db.get(["clock"]) as number) ?? 0
-	}
-
-	push(req: SyncPushRequest): SyncPushResponse {
+	push(scope: Tuple, req: SyncPushRequest): SyncPushResponse {
 		const { ops, syncedClock } = req
 		const tx = tupleTx(this.db)
-		let currentClock = (tx.get(["clock"]) as number) ?? 0
 
 		// 1. Apply new operations
 		for (const op of ops) {
 			// Idempotency check
-			// Use tupleTx so .get is available
+			// We use a global "seen" subspace to track operation IDs
 			if (tx.get(["seen", op.id])) continue
 
-			currentClock++
-			tx.set(["clock"], currentClock)
-			tx.set(["history", currentClock], op)
-			tx.set(["seen", op.id], currentClock)
+			// Mark as seen
+			// We store timestamp or just true
+			tx.set(["seen", op.id], Date.now())
 
 			const reducer = this.reducers[op.fn]
 			if (!reducer) {
@@ -34,31 +29,31 @@ export class SyncServer {
 				continue
 			}
 
-			// Execute the reducer on the transaction
-			reducer(tx, ...op.args)
+			// Wrap the transaction to inject metadata
+			// This allows syncDb(tx) to pick up the txId automatically
+			const contextTx = Object.create(tx)
+			contextTx.syncMetadata = {
+				txId: op.id,
+				authorId: "todo", // We would extract this from auth context
+				timestamp: op.timestamp,
+			}
+
+			// Execute the reducer on the context-aware transaction
+			// The reducer is responsible for using `syncDb(tx.subspace(...))` to write changes
+			reducer(contextTx, ...op.args)
 		}
 
 		tx.commit()
 
-		// 2. Fetch operations the client missed (rebase)
-		// The client says they are at `syncedClock`.
-		// We need to send back everything from `syncedClock + 1` to `currentClock`.
-		const newOps: Operation[] = []
-		// If the client is way behind, this could be huge.
-		// Real implementations would paginate.
-		// For now, we fetch all.
-		const history = this.db.list({
-			gt: ["history", syncedClock],
-			lte: ["history", currentClock],
-		})
-
-		for (const { value } of history) {
-			newOps.push(value as Operation)
-		}
+		// 2. Fetch updates the client missed (rebase)
+		// We fetch history specifically for the requested scope
+		const scopeDb = syncDb(this.db.subspace(scope))
+		const history = scopeDb.history(syncedClock)
+		const updates = history.map((h) => h.entry)
 
 		return {
-			serverClock: currentClock,
-			newOps,
+			serverClock: scopeDb.clock(),
+			updates,
 		}
 	}
 }

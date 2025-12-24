@@ -2,6 +2,7 @@ import { Cache } from "../Cache"
 import { TupleSubspaceEncoder } from "../Encoder"
 import { tupleTx } from "../TupleDb"
 import { TupleDb, TupleTx, WriteArgs } from "../types"
+import { SyncHistoryEntry, syncDb } from "../SyncDb"
 import { Operation, ReducerMap, SyncPushRequest, SyncPushResponse } from "./types"
 
 export type SyncTransport = (prefix: any[], req: SyncPushRequest) => Promise<SyncPushResponse>
@@ -36,7 +37,7 @@ export class SyncManager {
 }
 
 export class SyncSession {
-	pendingOps: { op: Operation; cleanup: () => void }[] = []
+	pendingOps: { op: Operation; cleanup: () => void; changes: WriteArgs<any, any> }[] = []
 	syncedClock: number = 0
 
 	constructor(
@@ -56,7 +57,7 @@ export class SyncSession {
 			timestamp: Date.now(),
 		}
 
-		// 1. Optimistic Apply to Cache
+		// 1. Run Optimistic Reducer
 		const reducer = this.manager.reducers[fn]
 		if (!reducer) throw new Error("Unknown reducer")
 
@@ -64,184 +65,172 @@ export class SyncSession {
 		const writes: WriteArgs<any, any> = { set: [], delete: [] }
 		const proxyTx = this.createProxyTx(writes)
 
-		reducer(proxyTx, ...args)
+		// Context-aware execution
+		const contextTx = Object.create(proxyTx)
+		contextTx.syncMetadata = { txId: op.id, timestamp: op.timestamp }
 
-		// Apply to Cache (Optimistic)
-		// We need to prefix the writes with [...prefix, "data"] before writing to cache
-		const prefixedWrites = this.prefixWrites(writes)
-		const cleanup = this.manager.cache.write(prefixedWrites)
+		reducer(contextTx, ...args)
+
+		// 2. Apply to Cache (Optimistic)
+		// Writes are already Fully Qualified (FQ) from Root because createProxyTx handles subspace.
+		// We filter to ensure we only apply writes relevant to this session
+		const scopedWrites = this.filterWrites(writes)
+		
+		const cleanup = this.manager.cache.write(scopedWrites)
 
 		// Queue
-		this.pendingOps.push({ op, cleanup })
+		this.pendingOps.push({ op, cleanup, changes: scopedWrites })
 
 		// Trigger sync
 		this.sync()
 	}
 
-	prefixWrites(writes: WriteArgs<any, any>): WriteArgs<any, any> {
-		// Prefix everything with [...this.prefix, "data"]
-		// But wait, the reducer might already be writing to the intended keys relative to the "root".
-		// We assume reducers are written assuming they run on a DB.
-		// If we are "user/1", and reducer writes "inbox", we want "user/1/data/inbox".
-		const dataPrefix = [...this.prefix, "data"]
+	filterWrites(writes: WriteArgs<any, any>): WriteArgs<any, any> {
+		// We only allow writes that start with `this.prefix`
+		// This is a basic form of client-side sharding/security.
+		// The generic reducer might try to write elsewhere, but this session can't track it.
+		
+		// Helper to check prefix
+		const isMatch = (key: any[]) => {
+			if (key.length < this.prefix.length) return false
+			for (let i = 0; i < this.prefix.length; i++) {
+				if (this.manager.db.compare(key[i], this.prefix[i]) !== 0) return false
+			}
+			return true
+		}
+
 		return {
-			set: writes.set?.map(({ key, value }) => ({
-				key: [...dataPrefix, ...key],
-				value,
-			})),
-			delete: writes.delete?.map((key) => [...dataPrefix, ...key]),
+			set: writes.set?.filter(({ key }) => isMatch(key)) || [],
+			delete: writes.delete?.filter((key) => isMatch(key)) || [],
 		}
 	}
 
-	// This is a proxy for the REDUCER running OPTIMISTICALLY.
-	// It writes to a capture buffer.
-	createProxyTx(writes: WriteArgs<any, any>): TupleTx {
+	createProxyTx(writes: WriteArgs<any, any>, scope: any[] = []): TupleTx {
 		return {
 			compare: this.manager.db.compare,
 			set: (key: any, value: any) => {
-				writes.set?.push({ key, value })
+				writes.set?.push({ key: [...scope, ...key], value })
 			},
 			delete: (key: any) => {
-				writes.delete?.push(key)
+				writes.delete?.push([...scope, ...key])
 			},
 			get: (key: any) => {
-				// Read from GLOBAL cache using PREFIXED key
-				const prefixedKey = [...this.prefix, "data", ...key]
-				const res = this.manager.cache.list({ gte: prefixedKey, lte: prefixedKey })
+				// Read from GLOBAL cache using FQ key
+				const fullKey = [...scope, ...key]
+				const res = this.manager.cache.list({ gte: fullKey, lte: fullKey })
 				return res.hit?.[0]?.value
 			},
 			list: (args: any) => {
-				// List from GLOBAL cache using PREFIXED range
-				// We need a helper to prefix ListArgs
-				// EncodeSubspaceListArgs logic
-				// For now simple approximation:
-				const dataPrefix = [...this.prefix, "data"]
-				// const prefixedArgs = ...
-				// This is getting complex to implement perfectly inside `createProxyTx`.
-				// Ideally we reuse `TupleSubspaceEncoder`.
-				const encoder = TupleSubspaceEncoder(dataPrefix)
-				// We need to manually encode args.
-				// But we don't have EncodeSubspaceListArgs imported here efficiently?
-				// Let's assume list() is not heavily used in optimistic reducers or implement basic support.
-				return [] // TODO: Implement list read for optimistic reducers
+				// We don't support complex range reads in optimistic reducer yet
+				return []
 			},
-			write: () => {
-				throw new Error("Nested write not supported in reducer proxy")
+			write: (args: WriteArgs<any, any>) => {
+				args.set?.forEach(({ key, value }) => writes.set?.push({ key: [...scope, ...key], value }))
+				args.delete?.forEach((key) => writes.delete?.push([...scope, ...key]))
 			},
 			commit: () => {},
 			committed: false,
 			has: (key: any) => {
-				const prefixedKey = [...this.prefix, "data", ...key]
-				return !!this.manager.cache.list({ gte: prefixedKey, lte: prefixedKey }).hit?.length
+				const fullKey = [...scope, ...key]
+				return !!this.manager.cache.list({ gte: fullKey, lte: fullKey }).hit?.length
 			},
 			subspace: (p: any) => {
-				throw new Error("Subspace not supported in reducer proxy yet")
+				return this.createProxyTx(writes, [...scope, ...p])
 			},
 		} as unknown as TupleTx
 	}
 
+	isSyncing = false
 	async sync() {
-		if (this.pendingOps.length === 0) {
-			// Just pull?
-		}
-
-		const opsToSend = this.pendingOps.map((p) => p.op)
+		if (this.isSyncing) return
+		this.isSyncing = true
 
 		try {
-			const res = await this.manager.transport(this.prefix, {
-				ops: opsToSend,
-				syncedClock: this.syncedClock,
-			})
+			while (true) {
+				const opsToSend = this.pendingOps.map((p) => p.op)
+				if (opsToSend.length === 0) {
+					// Check if we need to pull?
+					// For now we just return.
+					// A real implementation would track "lastPull" and pull if stale.
+					break
+				}
 
-			// Success!
-			// 1. Update Clock
-			this.syncedClock = res.serverClock
-			this.manager.db.set([...this.prefix, "clock"], this.syncedClock)
+				const res = await this.manager.transport(this.prefix, {
+					ops: opsToSend,
+					syncedClock: this.syncedClock,
+				})
 
-			// 2. Undo ALL pending ops (Clean slate)
-			for (const p of this.pendingOps) {
-				p.cleanup()
-			}
+				// 1. Revert ALL pending ops
+				for (const p of this.pendingOps) {
+					p.cleanup()
+				}
 
-			// 3. Apply `newOps` (from server) to DB + Cache Base
-			for (const op of res.newOps) {
-				this.applyServerOp(op)
-			}
+				// 2. Apply Updates from Server
+				// Update clock
+				this.syncedClock = res.serverClock
+				this.manager.db.set([...this.prefix, "clock"], this.syncedClock)
 
-			// 4. Determine remaining pending ops
-			const confirmedIds = new Set(opsToSend.map((o) => o.id))
-			const remainingOps = this.pendingOps.map((p) => p.op).filter((op) => !confirmedIds.has(op.id))
+				// Apply changes to local DB and Cache
+				for (const entry of res.updates) {
+					this.applyServerUpdate(entry)
+				}
 
-			this.pendingOps = []
+				// 3. Determine remaining pending ops
+				const confirmedTxIds = new Set(res.updates.map((u) => u.metadata.txId).filter(Boolean))
+				
+				const remainingOps = this.pendingOps.filter(p => !confirmedTxIds.has(p.op.id))
+				this.pendingOps = []
 
-			// 5. Re-apply remaining ops
-			for (const op of remainingOps) {
-				const reducer = this.manager.reducers[op.fn]
-				if (!reducer) continue
+				// 4. Re-apply remaining pending ops
+				for (const p of remainingOps) {
+					// Re-run reducer to handle state dependency changes
+					const reducer = this.manager.reducers[p.op.fn]
+					if (!reducer) continue
 
-				const writes: WriteArgs<any, any> = { set: [], delete: [] }
-				const proxyTx = this.createProxyTx(writes)
-				reducer(proxyTx, ...op.args)
+					const writes: WriteArgs<any, any> = { set: [], delete: [] }
+					const proxyTx = this.createProxyTx(writes)
+					const contextTx = Object.create(proxyTx)
+					contextTx.syncMetadata = { txId: p.op.id, timestamp: p.op.timestamp }
 
-				const prefixedWrites = this.prefixWrites(writes)
-				const cleanup = this.manager.cache.write(prefixedWrites)
-				this.pendingOps.push({ op, cleanup })
+					reducer(contextTx, ...p.op.args)
+
+					const scopedWrites = this.filterWrites(writes)
+					const cleanup = this.manager.cache.write(scopedWrites)
+					
+					this.pendingOps.push({ op: p.op, cleanup, changes: scopedWrites })
+				}
+
+				if (remainingOps.length === opsToSend.length) {
+					// No progress made (no updates confirmed), stop loop to avoid infinite spin
+					// This happens if server processed but didn't return updates (maybe empty history?)
+					// Or if server is behind?
+					// In a real system, we might backoff.
+					break
+				}
+				if (this.pendingOps.length === 0) break
 			}
 		} catch (e) {
 			console.error("Sync failed", e)
+		} finally {
+			this.isSyncing = false
 		}
 	}
 
-	applyServerOp(op: Operation) {
-		const reducer = this.manager.reducers[op.fn]
-		if (!reducer) return
-
-		const tx = tupleTx(this.manager.db)
-
-		// This proxy applies writes to the GLOBAL DB and CACHE using the "data" subspace.
-		// Since we are inside a SyncSession for a specific prefix, we implicitly prune/filter
-		// by virtue of only applying writes that this session cares about?
-		// No, the reducer logic might be generic.
-		// "sendMessage" reducer writes "inbox/1".
-		// In the context of `SyncSession(["user", 1])`, this becomes `["user", 1, "data", "inbox", 1]`.
-
-		// So we always prefix with `[...prefix, "data"]`.
+	applyServerUpdate(entry: SyncHistoryEntry) {
+		const { changes } = entry
+		
+		// Changes in HistoryEntry are logical (relative to data root)
+		// We must map them to FQ keys: [...prefix, "data", ...key]
 		const dataPrefix = [...this.prefix, "data"]
 
-		const wrappingTx = {
-			...tx,
-			set: (key: any, value: any) => {
-				const fullKey = [...dataPrefix, ...key]
-				tx.set(fullKey, value)
-				this.manager.cache.data.write({ set: [{ key: fullKey, value }] })
-			},
-			delete: (key: any) => {
-				const fullKey = [...dataPrefix, ...key]
-				tx.delete(fullKey)
-				this.manager.cache.data.write({ delete: [fullKey] })
-			},
-			// Reads need to be prefixed too?
-			// Ideally reducers read from the transaction which sees the "data" view.
-			get: (k: any) => tx.get([...dataPrefix, ...k]),
-			list: (args: any) => [], // TODO: support list inside reducer
-			has: (k: any) => tx.has([...dataPrefix, ...k]),
-			write: (args: WriteArgs<any, any>) => {
-				// Prefix manual writes
-				const sets = args.set?.map(({ key, value }) => ({
-					key: [...dataPrefix, ...key],
-					value,
-				}))
-				const deletes = args.delete?.map((key) => [...dataPrefix, ...key])
-				tx.write({ set: sets, delete: deletes })
-				this.manager.cache.data.write({ set: sets, delete: deletes })
-			},
-			subspace: (p: any) => {
-				throw new Error("Subspace not implemented in pruning proxy")
-			},
-		} as unknown as TupleTx
+		const prefixedSets = changes.set?.map(({ key, value }) => ({
+			key: [...dataPrefix, ...key],
+			value,
+		}))
+		const prefixedDeletes = changes.delete?.map((key) => [...dataPrefix, ...key])
 
-		reducer(wrappingTx, ...op.args)
-
-		tx.commit()
+		const writes = { set: prefixedSets, delete: prefixedDeletes }
+		this.manager.db.write(writes)
+		this.manager.cache.write(writes)
 	}
 }

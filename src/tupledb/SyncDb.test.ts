@@ -21,8 +21,8 @@ describe("Syncable", () => {
 		// Check history
 		const history = user.history()
 		assert.equal(history.length, 1)
-		assert.equal(history[0].key[0], 0) // clock 0
-		assert.deepEqual(history[0].value, { set: [{ key: ["name"], value: "chet" }] })
+		assert.equal(history[0].clock, 1) // clock starts at 1 now
+		assert.deepEqual(history[0].entry.changes, { set: [{ key: ["name"], value: "chet" }] })
 	})
 
 	it("batch writes", () => {
@@ -43,11 +43,11 @@ describe("Syncable", () => {
 
 		const history = user.history()
 		assert.equal(history.length, 1)
-		assert.deepEqual(history[0].value.set, [
+		assert.deepEqual(history[0].entry.changes.set, [
 			{ key: ["a"], value: 1 },
 			{ key: ["b"], value: 2 },
 		])
-		assert.deepEqual(history[0].value.delete, [["c"]])
+		assert.deepEqual(history[0].entry.changes.delete, [["c"]])
 	})
 
 	it("subspaces share history", () => {
@@ -64,13 +64,8 @@ describe("Syncable", () => {
 		// Check root history
 		const history = user.history()
 		assert.equal(history.length, 1)
-		// History key should be preserved (no prefix in the history value's WriteArgs?
-		// Wait, my implementation prefixes them!)
-		// Let's check the implementation again.
-		// syncableSubspace prefixes the keys before calling root.writeSyncable.
-		// So the history should contain the full key.
-
-		assert.deepEqual(history[0].value.set?.[0]?.key, ["inbox", "msg1"])
+		// History key should be preserved
+		assert.deepEqual(history[0].entry.changes.set?.[0]?.key, ["inbox", "msg1"])
 
 		// Check data retrieval
 		assert.equal(inbox.get(["msg1"]), "hello")
@@ -85,8 +80,8 @@ describe("Syncable", () => {
 
 		// Check actual DB keys
 		assert.equal(db.get(["clock"]), 1)
-		// history is at ["history", 0]
-		assert.ok(db.get(["history", 0]))
+		// history is at ["history", 1]
+		assert.ok(db.get(["history", 1]))
 		// data is at ["data", "a"]
 		assert.equal(db.get(["data", "a"]), 1)
 	})

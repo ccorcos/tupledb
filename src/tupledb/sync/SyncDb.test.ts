@@ -4,6 +4,7 @@ import { tupleDb } from "../TupleDb"
 import { SyncManager } from "./SyncClient"
 import { SyncServer } from "./SyncServer"
 import { SyncPushResponse } from "./types"
+import { syncDb } from "../SyncDb"
 
 // Mock transport
 const createTransport = (server: SyncServer) => {
@@ -13,23 +14,7 @@ const createTransport = (server: SyncServer) => {
 		push: async (prefix: any[], req: any): Promise<SyncPushResponse> => {
 			if (!online) throw new Error("Offline")
 			await new Promise((resolve) => setTimeout(resolve, 10))
-			// The Server is usually monolithic or subspace-aware.
-			// For this test, we assume the server serves the specific prefix.
-			// We'll wrap the server logic to target the prefix manually if needed,
-			// or we assume `server.push` writes to the root it was given.
-
-			// In the new architecture, Client `SyncSession(["user", 1])` pushes to server.
-			// If the server was initialized with `db.subspace(["user", 1])`, then direct push is fine.
-			// But here we have one `server` instance.
-			// Let's assume the server is "Multi-Tenant" capable or we just route to `server.push`.
-			// But `SyncServer` writes to `["clock"]` at root.
-
-			// To properly test "Sync Spaces", we should probably use `server.db.subspace(prefix)`?
-			// But `SyncServer` class doesn't support dynamic subspace in `push`.
-			// Let's re-instantiate a SyncServer for the prefix on the fly for the test.
-			const scopedDb = server.db.subspace(prefix)
-			const scopedServer = new SyncServer(scopedDb, server.reducers)
-			return scopedServer.push(req)
+			return server.push(prefix, req)
 		},
 	}
 }
@@ -39,7 +24,10 @@ describe("SyncDb", () => {
 		const serverDb = tupleDb()
 		const reducers = {
 			sendMessage: (tx: any, msg: any) => {
-				tx.set(["inbox", msg.id], msg)
+				// Reducer must use SyncDb to ensure writes are tracked
+				// We assume 'tx' is the context-aware transaction
+				const db = syncDb(tx.subspace(["user", msg.fromId]))
+				db.set(["inbox", msg.id], msg)
 			},
 		}
 
@@ -56,7 +44,7 @@ describe("SyncDb", () => {
 		const session = manager.session(["user", 1])
 
 		// 1. Dispatch Optimistic Op
-		const msg1 = { id: "msg1", text: "hello" }
+		const msg1 = { id: "msg1", fromId: 1, text: "hello" }
 		session.dispatch("sendMessage", msg1)
 
 		// Verify optimistic update in Global Cache
@@ -75,36 +63,8 @@ describe("SyncDb", () => {
 		await new Promise((resolve) => setTimeout(resolve, 50))
 
 		// Verify applied to Server (at subspace)
-		// Server DB has `["user", 1, "data", "inbox", "msg1"]`?
-		// Yes, because `createTransport` created a subspace `["user", 1]`.
-		// The reducer writes `["inbox", ...]`.
-		// So `subspace.set(["inbox", ...])` -> `root.set(["user", 1, "inbox", ...])`?
-		// Wait, `SyncServer` logic: `reducer(tx)`. `tx` writes to root of that server.
-		// If server is `db.subspace(["user", 1])`.
-		// Reducer writes `["inbox", "msg1"]`.
-		// Result in `serverDb` (root) is `["user", 1, "inbox", "msg1"]`.
-		// But `SyncClient` expects data at `[...prefix, "data", ...]`.
-
-		// Mismatch!
-		// `SyncClient` wraps local writes in `["data"]`.
-		// The `SyncServer` (and shared Reducers) usually define the schema.
-		// If the Reducer writes `["inbox"]`, that's the canonical key.
-		// `SyncClient` puts it in `["data"]` locally to avoid collision with `["clock"]`.
-		// Does `SyncServer` put it in `["data"]`?
-		// My `SyncServer.ts` implementation: `reducer(tx, ...op.args)`. No wrapping!
-		// So Server stores `["user", 1, "inbox", ...]`.
-		// Client stores `["user", 1, "data", "inbox", ...]`.
-
-		// This discrepancy is fine IF the Client knows how to map it.
-		// `SyncClient.applyServerOp`: `const dataPrefix = [...this.prefix, "data"]`.
-		// It wraps writes from server in `dataPrefix`.
-		// So Client *adds* the "data" layer locally.
-		// The Server *does not* have the "data" layer in its schema (unless reducer puts it there).
-
-		// So Server DB should have: `["user", 1, "inbox", "msg1"]`.
-		// Client DB should have: `["user", 1, "data", "inbox", "msg1"]`.
-
-		const serverKey = ["user", 1, "inbox", "msg1"]
+		// Server DB should have: `["user", 1, "data", "inbox", "msg1"]`
+		const serverKey = ["user", 1, "data", "inbox", "msg1"]
 		const serverHit = serverDb
 			.list()
 			.find((item) => JSON.stringify(item.key) === JSON.stringify(serverKey))
@@ -112,6 +72,7 @@ describe("SyncDb", () => {
 		assert.deepEqual(serverHit.value, msg1)
 
 		// Client DB check
+		// Client DB should have data now
 		const clientHit = clientDb
 			.list()
 			.find((item) => JSON.stringify(item.key) === JSON.stringify(key))
@@ -120,18 +81,18 @@ describe("SyncDb", () => {
 
 		// 2. Sync from another client
 		// Another client pushes to server for the same user.
-		const msg2 = { id: "msg2", text: "world" }
-		// We simulate server receiving it.
-		// We need to use the `scopedServer` logic again to write to the right place.
-		const scopedDb = serverDb.subspace(["user", 1])
-		const scopedServer = new SyncServer(scopedDb, server.reducers)
-		scopedServer.push({
+		const msg2 = { id: "msg2", fromId: 1, text: "world" }
+		
+		// Simulate another client pushing
+		// We can just call server.push directly
+		server.push(["user", 1], {
 			ops: [{ id: "op2", fn: "sendMessage", args: [msg2], timestamp: Date.now() }],
 			syncedClock: 0,
 		})
 
-		// Client syncs again
-		session.dispatch("sendMessage", { id: "trigger", text: "force sync" })
+		// Client syncs again (triggered by new dispatch or manually)
+		// We trigger a manual sync or dispatch something to force sync
+		session.dispatch("sendMessage", { id: "trigger", fromId: 1, text: "force sync" })
 		await new Promise((resolve) => setTimeout(resolve, 50))
 
 		// Client should receive msg2
@@ -144,7 +105,12 @@ describe("SyncDb", () => {
 
 	it("handles multiple sessions", async () => {
 		const serverDb = tupleDb()
-		const reducers = { write: (tx: any, k: any, v: any) => tx.set(k, v) }
+		const reducers = {
+			write: (tx: any, k: any, v: any, userId: number) => {
+				const db = syncDb(tx.subspace(["user", userId]))
+				db.set(k, v)
+			}
+		}
 		const server = new SyncServer(serverDb, reducers)
 		const transport = createTransport(server)
 
@@ -157,8 +123,8 @@ describe("SyncDb", () => {
 		const sess1 = manager.session(["user", 1])
 		const sess2 = manager.session(["user", 2])
 
-		sess1.dispatch("write", ["val"], 1)
-		sess2.dispatch("write", ["val"], 2)
+		sess1.dispatch("write", ["val"], 1, 1)
+		sess2.dispatch("write", ["val"], 2, 2)
 
 		await new Promise((r) => setTimeout(r, 50))
 

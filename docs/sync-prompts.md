@@ -40,6 +40,8 @@ This looks like a great start. But it doesnâ€™t quite fulfill the entire goal Iâ
 
 ---
 
+@src/tupledb/SyncDb.ts @src/tupledb/sync/
+
 
 I have some ideas for improvement here but it doesnt entirely fit together. Help me figure this out. Lets take a step by step approach and carefully consider the API. I want things to light and simple and composable rather than a mega api that wraps everything and obscures whats going on under the hood.
 
@@ -125,4 +127,67 @@ There are a few piece that don't fit together yet that we need to think about...
 1. Client transactions get fragmented across many syncDb histories and in a way that not all operations in a single client transaction should be visible to each syncDb. So there end up being many ServerTransactions that live in separate syncdb histories but still have the same underlying transaction id because it emanated from the same client transaction. Perhaps we can track this somehow, but it's not particularly important right now. The question is how we make sure the client transactoin information ends up in the history or eazch sycnDb we write to...
 
 2. I like how the list api generalizes really well allowing for clients to sync. However, there's going to be some tricky things where a client might be out of date when they read and so every read probably needs to be from a syncDb and return a clock value and any new history as well. I think we can generalize this to some extent where this method returns a set of tuples, some of which may occur from outside the requested range (such as history and clock value). And that could make this whole thing work...
+
+---
+
+So this is closer... Lets focus on the write path for now and deal with the read path next.
+
+I don't think the syncDb history should lose the semantics of the operations though... My example had set and delete but the goal wasnt for SyncHistoryEntry changes to jsut be WriteArgs. However, I do want to be able to replay history... So lets reformulate the example a little bit.
+
+
+```ts
+// Lets make it more clear that these operations are semantic and we can choose them however we want.
+// We may choose a more general pattern with just set and delete, but we can have anything here.
+type Operation =
+	| {fn: "updateUser", args: [{id: string, name?: string, bio?: string, age?: number}]}
+	| {fn: "sendMessage", args: [Message]}
+	| {fn: "deleteMessage", args: [{id: string}]}
+
+
+// These reducers for the user syncDbs
+const userReducers = (userId: string) => ({
+	sendMessage: (tx: TupleDb, msg: Message) => {
+		if (msg.fromId === userId) {
+			tx.set(["sent", msg.datetime, msg.id], msg)
+		} else {
+			tx.set(["inbox", msg.datetime, msg.id], msg)
+		}
+	}
+})
+
+
+// These reducers aren't actually associated with a syncDb necessarily and could just be used for
+// performing the operations. Interestingly, we could have a syncDb inside a syncDb now and have a
+// global database history if we wanted.
+const serverReducers = (authorId) => ({
+	sendMessage: (tx: TupleDb, msg: Message) => {
+		// after validation stuff....
+		const authorDb = syncDb(tx.subspace(["user", obj.fromId]), userReducers(obj.fromId))
+		authorDb.sendMessage(msg)
+
+		for (const userId of obj.toId) {
+			const userDb = syncDb(tx.subspace(["user", toId]), userReducers(toId))
+			authorDb.sendMessage(msg)
+		}
+	}
+})
+
+
+const serverApi = {
+	write(transactions: ClientTransaction[]) {
+		// Write using the reducers.
+		const tx = tupleTx(db)
+		const reducers = serverReducers(currentAuthorId)
+		for (const tx of transactions) for (const op of tx.operations) reducers[op.fn](tx, ...op.args)
+		tx.commit()
+	},
+}
+
+```
+
+I feel like that's pretty good for the write side of things. We still need to plumb some of the transaction metadata through there though.
+
+On the client, we can use those same reducers for optimistic writes and processing sync updates.
+
+---
 

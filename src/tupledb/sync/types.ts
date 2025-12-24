@@ -1,4 +1,5 @@
 import { TupleTx } from "../types"
+import { SyncHistoryEntry } from "../SyncDb"
 
 export type Operation = {
 	id: string
@@ -7,6 +8,8 @@ export type Operation = {
 	timestamp: number
 }
 
+// Reducers now receive a generic DB interface, which could be a Transaction or a SyncDb wrapper
+// We'll keep it as TupleTx for now but it might be augmented
 export type Reducer = (tx: TupleTx, ...args: any[]) => void
 export type ReducerMap = Record<string, Reducer>
 
@@ -19,11 +22,11 @@ export type SyncPushRequest = {
 export type SyncPushResponse = {
 	// The server's current clock
 	serverClock: number
-	// Ops that happened since syncedClock that the client missed (excluding the ones just pushed if successful)
-	newOps: Operation[]
+	// History entries that happened since syncedClock
+	updates: SyncHistoryEntry[]
 }
 
 export type SyncPullResponse = {
 	serverClock: number
-	ops: Operation[]
+	updates: SyncHistoryEntry[]
 }
