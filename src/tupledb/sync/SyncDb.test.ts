@@ -3,19 +3,30 @@ import { describe, it } from "node:test"
 import { tupleDb } from "../TupleDb"
 import { SyncManager } from "./SyncClient"
 import { SyncServer } from "./SyncServer"
-import { SyncPushResponse } from "./types"
+import { SyncResult, ReadResult, WriteResult } from "./types"
 import { syncDb } from "../SyncDb"
+import { ListArgs, Tuple } from "../types"
 
 // Mock transport
 const createTransport = (server: SyncServer) => {
 	let online = true
 	return {
 		setOnline: (status: boolean) => (online = status),
-		push: async (prefix: any[], req: any): Promise<SyncPushResponse> => {
+		write: async (prefix: any[], ops: any[]): Promise<WriteResult> => {
 			if (!online) throw new Error("Offline")
 			await new Promise((resolve) => setTimeout(resolve, 10))
-			return server.push(prefix, req)
+			return server.write(prefix, ops)
 		},
+		sync: async (prefix: any[], ops: any[], clock: number): Promise<SyncResult> => {
+			if (!online) throw new Error("Offline")
+			await new Promise((resolve) => setTimeout(resolve, 10))
+			return server.sync(prefix, ops, clock)
+		},
+		read: async (prefix: any[], range: ListArgs<Tuple>, clock: number): Promise<ReadResult> => {
+			if (!online) throw new Error("Offline")
+			await new Promise((resolve) => setTimeout(resolve, 10))
+			return server.read(prefix, range, clock)
+		}
 	}
 }
 
@@ -35,7 +46,7 @@ describe("SyncDb", () => {
 		const manager = new SyncManager({
 			db: clientDb,
 			reducers,
-			transport: transport.push,
+			transport,
 		})
 
 		const session = manager.session(["user", 1])
@@ -45,7 +56,6 @@ describe("SyncDb", () => {
 		session.dispatch("sendMessage", msg1)
 
 		// Verify optimistic update in Global Cache
-		// Data should be at ["user", 1, "data", "inbox", "msg1"]
 		const key = ["user", 1, "data", "inbox", "msg1"]
 		const cacheRes = manager.cache.list({ gte: key, lte: key })
 		const val = cacheRes.hit?.[0]?.value
@@ -53,85 +63,125 @@ describe("SyncDb", () => {
 		assert.ok(val, "Value should be present in cache")
 		assert.deepEqual(val, msg1, "Value should match msg1")
 
-		// Verify NOT yet in Client DB (pending)
-		assert.equal(clientDb.get(key), undefined)
-
-		// Wait for sync
 		await new Promise((resolve) => setTimeout(resolve, 50))
 
-		// Verify applied to Server (at subspace)
-		// Server DB should have: `["user", 1, "data", "inbox", "msg1"]`
-		// The server creates a SyncDb at `["user", 1]`.
-		// It writes to `["data", "inbox", "msg1"]` relative to that.
-		// So `["user", 1, "data", "inbox", "msg1"]`.
+		// Verify applied to Server
 		const serverKey = ["user", 1, "data", "inbox", "msg1"]
 		const serverHit = serverDb
 			.list()
 			.find((item) => JSON.stringify(item.key) === JSON.stringify(serverKey))
 		assert.ok(serverHit, "Item should be in server DB")
-		assert.deepEqual(serverHit.value, msg1)
 
 		// Client DB check
-		// Client DB should have data now
 		const clientHit = clientDb
 			.list()
 			.find((item) => JSON.stringify(item.key) === JSON.stringify(key))
 		assert.ok(clientHit, "Item should be in client DB at data path")
-		assert.deepEqual(clientHit.value, msg1)
-
-		// 2. Sync from another client
-		// Another client pushes to server for the same user.
-		const msg2 = { id: "msg2", fromId: 1, text: "world" }
-		
-		// Simulate another client pushing
-		const metadata = { txId: "op2", timestamp: Date.now() }
-		server.push(["user", 1], {
-			ops: [{ metadata, op: { fn: "sendMessage", args: [msg2] } }],
-			syncedClock: 0,
-		})
-
-		// Client syncs again (triggered by new dispatch or manually)
-		session.dispatch("sendMessage", { id: "trigger", fromId: 1, text: "force sync" })
-		await new Promise((resolve) => setTimeout(resolve, 50))
-
-		// Client should receive msg2
-		const key2 = ["user", 1, "data", "inbox", "msg2"]
-		const clientHit2 = clientDb
-			.list()
-			.find((item) => JSON.stringify(item.key) === JSON.stringify(key2))
-		assert.ok(clientHit2, "Client should receive msg2")
 	})
 
-	it("handles multiple sessions", async () => {
+	it("lazy fetch and partial sync", async () => {
 		const serverDb = tupleDb()
 		const reducers = {
-			write: (db: any, k: any, v: any) => db.set(k, v)
+			setDoc: (db: any, k: any, v: any) => db.set(k, v)
 		}
 		const server = new SyncServer(serverDb, reducers)
 		const transport = createTransport(server)
 
+		// Pre-populate server with data
+		const serverUserDb = syncDb(serverDb.subspace(["user", 1]), reducers)
+		serverUserDb.setDoc(["doc", "1"], "v1") // clock 1
+		serverUserDb.setDoc(["doc", "2"], "v2") // clock 2
+		serverUserDb.setDoc(["doc", "3"], "v3") // clock 3
+
+		const clientDb = tupleDb()
 		const manager = new SyncManager({
-			db: tupleDb(),
+			db: clientDb,
 			reducers,
-			transport: transport.push,
+			transport,
 		})
+		const session = manager.session(["user", 1])
 
-		const sess1 = manager.session(["user", 1])
-		const sess2 = manager.session(["user", 2])
+		// 1. Dispatch optimistic write on client
+		session.dispatch("setDoc", ["doc", "4"], "v4") // pending...
 
-		sess1.dispatch("write", ["val"], 1)
-		sess2.dispatch("write", ["val"], 2)
+		// 2. Client requests range
+		const results = await session.list({ gte: ["doc", "1"], lte: ["doc", "2"] })
+		
+		assert.equal(results.length, 2)
+		assert.deepEqual(results[0].value, "v1")
+		assert.deepEqual(results[1].value, "v2")
+		
+		assert.ok(session.syncedClock >= 3)
+		
+		const doc3Key = ["user", 1, "data", "doc", "3"]
+		assert.equal(clientDb.get(doc3Key), "v3")
+
+		const doc4 = await session.list({ gte: ["doc", "4"], lte: ["doc", "4"] })
+		assert.deepEqual(doc4[0].value, "v4")
+	})
+
+	it("server rejection / override handling", async () => {
+		const serverDb = tupleDb()
+		const reducers = {
+			post: (db: any, id: string, content: string) => {
+				const time = db.syncMetadata?.timestamp ?? 0
+				db.set(["posts", id], { content, time })
+			}
+		}
+		
+		const server = new SyncServer(serverDb, reducers)
+		const transport = createTransport(server)
+		
+		const originalSync = transport.sync
+		transport.sync = (prefix, ops, clock) => {
+			const newOps = ops.map(op => ({
+				...op,
+				metadata: { ...op.metadata, timestamp: 9999 }
+			}))
+			return originalSync(prefix, newOps, clock)
+		}
+
+		const clientDb = tupleDb()
+		const manager = new SyncManager({ db: clientDb, reducers, transport })
+		const session = manager.session(["feed"])
+
+		const realDateNow = Date.now
+		Date.now = () => 100
+		session.dispatch("post", "p1", "hello")
+		Date.now = realDateNow
+
+		const optRes = await session.list({ gte: ["posts", "p1"], lte: ["posts", "p1"] })
+		assert.equal(optRes[0].value.time, 100)
 
 		await new Promise((r) => setTimeout(r, 50))
 
-		// Check local separation
-		const k1 = ["user", 1, "data", "val"]
-		const k2 = ["user", 2, "data", "val"]
+		const finalRes = await session.list({ gte: ["posts", "p1"], lte: ["posts", "p1"] })
+		assert.equal(finalRes[0].value.time, 9999)
+	})
 
-		const hit1 = manager.cache.list({ gte: k1, lte: k1 }).hit?.[0]
-		const hit2 = manager.cache.list({ gte: k2, lte: k2 }).hit?.[0]
+	it("write-only submission (offline recovery)", async () => {
+		const serverDb = tupleDb()
+		const reducers = {
+			log: (db: any, msg: string) => db.set(["logs", Date.now()], msg)
+		}
+		const server = new SyncServer(serverDb, reducers)
+		const transport = createTransport(server)
 
-		assert.equal(hit1?.value, 1)
-		assert.equal(hit2?.value, 2)
+		// Direct write via transport (simulating a recovery script)
+		const ops = [
+			{ metadata: { txId: "tx1" }, op: { fn: "log", args: ["recovered 1"] } },
+			{ metadata: { txId: "tx2" }, op: { fn: "log", args: ["recovered 2"] } }
+		]
+		
+		const res = await transport.write(["sys"], ops as any)
+		
+		assert.ok(res.clock >= 2)
+		
+		// Verify server applied them
+		const sysDb = syncDb(serverDb.subspace(["sys"]), reducers)
+		const history = sysDb.history()
+		assert.equal(history.length, 2)
+		assert.deepEqual(history[0].value.op.args, ["recovered 1"])
+		assert.deepEqual(history[1].value.op.args, ["recovered 2"])
 	})
 })

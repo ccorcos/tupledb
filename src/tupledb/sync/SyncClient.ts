@@ -1,10 +1,13 @@
 import { Cache } from "../Cache"
-import { tupleTx } from "../TupleDb"
-import { TupleDb, TupleTx, WriteArgs } from "../types"
-import { SyncHistoryEntry, Operation, ReducerMap, syncDb, defaultReducers } from "../SyncDb"
-import { SyncPushRequest, SyncPushResponse } from "./types"
+import { TupleDb, TupleTx, WriteArgs, ListArgs, Tuple } from "../types"
+import { SyncHistoryEntry, Operation, ReducerMap, syncDb } from "../SyncDb"
+import { SyncResult, ReadResult, WriteResult } from "./types"
 
-export type SyncTransport = (prefix: any[], req: SyncPushRequest) => Promise<SyncPushResponse>
+export type SyncTransport = {
+	write: (prefix: any[], ops: SyncHistoryEntry[]) => Promise<WriteResult>
+	sync: (prefix: any[], ops: SyncHistoryEntry[], syncedClock: number) => Promise<SyncResult>
+	read: (prefix: any[], range: ListArgs<Tuple>, syncedClock: number) => Promise<ReadResult>
+}
 
 export type SyncManagerConfig = {
 	db: TupleDb
@@ -21,7 +24,7 @@ export class SyncManager {
 
 	constructor(config: SyncManagerConfig) {
 		this.db = config.db
-		this.reducers = { ...defaultReducers, ...config.reducers }
+		this.reducers = config.reducers
 		this.transport = config.transport
 		this.cache = new Cache(config.db.compare)
 	}
@@ -36,7 +39,6 @@ export class SyncManager {
 }
 
 export class SyncSession {
-	// We track pending operations as the full Entry (op + metadata) and the cleanup/changes for rollback
 	pendingOps: { 
 		entry: SyncHistoryEntry; 
 		cleanup: () => void; 
@@ -51,6 +53,53 @@ export class SyncSession {
 		this.syncedClock = (this.manager.db.get([...this.prefix, "clock"]) as number) ?? 0
 	}
 
+	async list(args: ListArgs<Tuple>): Promise<{ key: Tuple; value: any }[]> {
+		const dataPrefix = [...this.prefix, "data"]
+		const prefixKey = (k: any[]) => [...dataPrefix, ...k]
+		const prefixedArgs: ListArgs<Tuple> = {
+			...args,
+			gt: args.gt ? prefixKey(args.gt) : undefined,
+			gte: args.gte ? prefixKey(args.gte) : undefined,
+			lt: args.lt ? prefixKey(args.lt) : undefined,
+			lte: args.lte ? prefixKey(args.lte) : undefined,
+		}
+
+		// 1. Check Cache
+		const cacheResult = this.manager.cache.list(prefixedArgs)
+		if (cacheResult.hit) {
+			return cacheResult.hit.map(({ key, value }) => ({
+				key: key.slice(dataPrefix.length),
+				value
+			}))
+		}
+
+		// 2. Fetch from Server
+		try {
+			const res = await this.manager.transport.read(this.prefix, args, this.syncedClock)
+			
+			// 3. Apply Updates
+			this.handleSyncResponse(res.clock, res.updates)
+
+			// 4. Insert Data
+			const prefixedData = res.data.map(({ key, value }) => ({
+				key: prefixKey(key),
+				value
+			}))
+			this.manager.cache.insert(prefixedArgs, prefixedData)
+
+			// 5. Return Merged Result
+			const finalResult = this.manager.cache.list(prefixedArgs)
+			return (finalResult.hit || prefixedData).map(({ key, value }) => ({
+				key: key.slice(dataPrefix.length),
+				value
+			}))
+
+		} catch (e) {
+			console.error("Read failed", e)
+			throw e
+		}
+	}
+
 	dispatch(fn: string, ...args: any[]) {
 		const op: Operation = { fn, args }
 		const metadata = { 
@@ -58,29 +107,29 @@ export class SyncSession {
 			timestamp: Date.now() 
 		}
 
-		// 1. Run Optimistic Reducer
-		const reducer = this.manager.reducers[fn]
+		let reducer = this.manager.reducers[fn]
+		// Fallback for default reducers
+		if (!reducer && (fn === "set" || fn === "delete")) {
+			if (fn === "set") reducer = (db: any, k: any, v: any) => db.set(k, v)
+			if (fn === "delete") reducer = (db: any, k: any) => db.delete(k)
+		}
 		if (!reducer) throw new Error(`Unknown reducer: ${fn}`)
 
-		// Capture writes
 		const writes: WriteArgs<any, any> = { set: [], delete: [] }
 		const proxyTx = this.createProxyTx(writes)
+		const contextTx = Object.create(proxyTx)
+		contextTx.syncMetadata = metadata
+		reducer(contextTx, ...args)
 
-		// Execute reducer on proxy (which mimics the data subspace)
-		reducer(proxyTx, ...args)
-
-		// 2. Apply to Cache (Optimistic)
 		const scopedWrites = this.filterWrites(writes)
 		const cleanup = this.manager.cache.write(scopedWrites)
 
-		// Queue
 		this.pendingOps.push({ 
 			entry: { op, metadata }, 
 			cleanup, 
 			changes: scopedWrites 
 		})
 
-		// Trigger sync
 		this.sync()
 	}
 
@@ -92,7 +141,6 @@ export class SyncSession {
 			}
 			return true
 		}
-
 		return {
 			set: writes.set?.filter(({ key }) => isMatch(key)) || [],
 			delete: writes.delete?.filter((key) => isMatch(key)) || [],
@@ -100,20 +148,7 @@ export class SyncSession {
 	}
 
 	createProxyTx(writes: WriteArgs<any, any>, scope: any[] = []): TupleTx {
-		// This proxy mimics `dataSpace`. 
-		// Since we are in `SyncSession` which manages `prefix`, the optimistic reducer 
-		// is likely running on `prefix`.
-		// However, the `SyncDb` wrapper on server passes `dataSpace` (subspace of `prefix`).
-		// So `proxyTx` should behave like `dataSpace`.
-		// BUT `SyncSession` writes go to `writes` buffer.
-		// We need to ensure keys are prefixed correctly for the `writes` buffer so `filterWrites` works?
-		// `filterWrites` expects Fully Qualified (FQ) keys (root).
-		
-		// If reducer writes to `["inbox"]`, and we are in `["user", 1]`, we want FQ key `["user", 1, "data", "inbox"]`.
-		// The `SyncDb` uses `data` subspace.
-		
 		const dataPrefix = [...this.prefix, "data", ...scope]
-
 		return {
 			compare: this.manager.db.compare,
 			set: (key: any, value: any) => {
@@ -131,16 +166,14 @@ export class SyncSession {
 				const res = this.manager.cache.list({ gte: fullKey, lte: fullKey })
 				return res.hit?.[0]?.value
 			},
-			list: () => [], // TODO: Cache list read
+			list: () => [], 
 			commit: () => {},
 			committed: false,
 			has: (key: any) => {
 				const fullKey = [...dataPrefix, ...key]
 				return !!this.manager.cache.list({ gte: fullKey, lte: fullKey }).hit?.length
 			},
-			subspace: (p: any) => {
-				return this.createProxyTx(writes, [...scope, ...p])
-			},
+			subspace: (p: any) => this.createProxyTx(writes, [...scope, ...p]),
 		} as unknown as TupleTx
 	}
 
@@ -154,44 +187,35 @@ export class SyncSession {
 				const entriesToSend = this.pendingOps.map((p) => p.entry)
 				if (entriesToSend.length === 0) break
 
-				const res = await this.manager.transport(this.prefix, {
-					ops: entriesToSend,
-					syncedClock: this.syncedClock,
-				})
+				const res = await this.manager.transport.sync(
+					this.prefix, 
+					entriesToSend, 
+					this.syncedClock
+				)
 
-				// 1. Revert ALL pending ops
-				for (const p of this.pendingOps) {
-					p.cleanup()
-				}
-
-				// 2. Apply Updates from Server
-				this.syncedClock = res.serverClock
-				this.manager.db.set([...this.prefix, "clock"], this.syncedClock)
-
-				for (const entry of res.updates) {
-					this.applyServerUpdate(entry)
-				}
-
-				// 3. Determine remaining pending ops
-				const confirmedTxIds = new Set(res.updates.map((u) => u.metadata.txId).filter(Boolean))
+				this.handleSyncResponse(res.clock, res.updates)
 				
+				const confirmedTxIds = new Set(res.updates.map((u) => u.metadata.txId).filter(Boolean))
 				const remainingOps = this.pendingOps.filter(p => !confirmedTxIds.has(p.entry.metadata.txId))
 				this.pendingOps = []
 
-				// 4. Re-apply remaining pending ops
 				for (const p of remainingOps) {
-					const reducer = this.manager.reducers[p.entry.op.fn]
+					// Re-apply optimistic
+					let reducer = this.manager.reducers[p.entry.op.fn]
+					if (!reducer && (p.entry.op.fn === "set" || p.entry.op.fn === "delete")) {
+						if (p.entry.op.fn === "set") reducer = (db: any, k: any, v: any) => db.set(k, v)
+						if (p.entry.op.fn === "delete") reducer = (db: any, k: any) => db.delete(k)
+					}
 					if (!reducer) continue
 
 					const writes: WriteArgs<any, any> = { set: [], delete: [] }
 					const proxyTx = this.createProxyTx(writes)
-
-					// Re-run reducer
-					reducer(proxyTx, ...p.entry.op.args)
+					const contextTx = Object.create(proxyTx)
+					contextTx.syncMetadata = p.entry.metadata
+					reducer(contextTx, ...p.entry.op.args)
 
 					const scopedWrites = this.filterWrites(writes)
 					const cleanup = this.manager.cache.write(scopedWrites)
-					
 					this.pendingOps.push({ entry: p.entry, cleanup, changes: scopedWrites })
 				}
 
@@ -205,34 +229,39 @@ export class SyncSession {
 		}
 	}
 
+	handleSyncResponse(serverClock: number, updates: SyncHistoryEntry[]) {
+		for (const p of this.pendingOps) {
+			p.cleanup()
+		}
+
+		this.syncedClock = serverClock
+		this.manager.db.set([...this.prefix, "clock"], this.syncedClock)
+
+		for (const entry of updates) {
+			this.applyServerUpdate(entry)
+		}
+	}
+
 	applyServerUpdate(entry: SyncHistoryEntry) {
-		// Run the reducer locally to generate the writes
-		// The server sent the Semantic Op
-		const reducer = this.manager.reducers[entry.op.fn]
+		let reducer = this.manager.reducers[entry.op.fn]
+		if (!reducer && (entry.op.fn === "set" || entry.op.fn === "delete")) {
+			if (entry.op.fn === "set") reducer = (db: any, k: any, v: any) => db.set(k, v)
+			if (entry.op.fn === "delete") reducer = (db: any, k: any) => db.delete(k)
+		}
+		
 		if (!reducer) {
 			console.warn(`Unknown reducer from server: ${entry.op.fn}`)
 			return
 		}
 
-		// We need to capture writes again
-		// This time we write them to the persistent DB AND Cache
-		// But wait, if we write to DB, we don't need to write to Cache if Cache is just a view over DB?
-		// No, Cache is separate (InMemory) in this architecture or an overlay?
-		// Usually Cache is an overlay on top of DB. 
-		// If we write to DB, the Cache should invalidate or update.
-		// Here `manager.cache` seems to be an InMemoryOkv used for UI subscriptions.
-		
 		const writes: WriteArgs<any, any> = { set: [], delete: [] }
-		const proxyTx = this.createProxyTx(writes) // Encodes to FQ keys
-
-		reducer(proxyTx, ...entry.op.args)
-
+		const proxyTx = this.createProxyTx(writes) 
+		const contextTx = Object.create(proxyTx)
+		contextTx.syncMetadata = entry.metadata
+		reducer(contextTx, ...entry.op.args)
 		const scopedWrites = this.filterWrites(writes)
 		
-		// Write to Local DB (Persistent)
 		this.manager.db.write(scopedWrites)
-		
-		// Write to Cache (View)
-		this.manager.cache.write(scopedWrites)
+		this.manager.cache.apply(scopedWrites)
 	}
 }

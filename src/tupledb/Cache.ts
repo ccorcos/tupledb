@@ -7,10 +7,10 @@ https://www.notion.so/chetcorcos/Local-Caching-1698d4136624809a876ddfb66d16ef35
 */
 
 import { uniqWith } from "lodash-es"
-import { compactObj } from "shared/compactObj"
-import { compare as cmp } from "shared/compare"
-import { OrderedList } from "shared/OrderedList"
-import { reverse } from "shared/reverse"
+import { compactObj } from "../shared/compactObj"
+import { compare as cmp } from "../shared/compare"
+import { OrderedList } from "../shared/OrderedList"
+import { reverse } from "../shared/reverse"
 import { InMemoryOkv } from "./InMemoryOkv"
 import {
 	Bound,
@@ -70,6 +70,22 @@ export class Cache<K, V> implements OkvCache<K, V> {
 
 		// Optimistic writes are still in this.pending sitting on top of this.data.
 		this.emitter.emit([range])
+	}
+
+	// Apply updates to the base data (Server State)
+	apply = (changes: WriteArgs<K, V>) => {
+		// TODO: Filter changes to only apply those within valid ranges?
+		// For now we apply all, assuming memory is cheap or user handles unsubscription.
+		// Implementing filtering requires iterating all ranges which might be slow.
+		
+		this.data.write(changes)
+
+		// Emit events for changed keys
+		const keys = [...(changes.set?.map(s => s.key) || []), ...(changes.delete || [])]
+		if (keys.length > 0) {
+			const ranges = keys.map(keyToRange)
+			this.emit(ranges)
+		}
 	}
 
 	listRaw = (args: ListArgs<K>): { key: K; value: V }[] => this.pending.list(args)

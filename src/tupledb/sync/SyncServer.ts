@@ -1,54 +1,69 @@
 import { tupleTx } from "../TupleDb"
-import { TupleDb, Tuple } from "../types"
-import { syncDb, defaultReducers, ReducerMap } from "../SyncDb"
-import { SyncPushRequest, SyncPushResponse } from "./types"
+import { TupleDb, Tuple, ListArgs } from "../types"
+import { syncDb, ReducerMap, SyncHistoryEntry } from "../SyncDb"
+import { SyncResult, ReadResult, WriteResult, FetchResult } from "./types"
 
 export class SyncServer {
 	constructor(
 		public db: TupleDb,
 		public reducers: ReducerMap
-	) {
-		this.reducers = { ...defaultReducers, ...reducers }
-	}
+	) {}
 
-	push(scope: Tuple, req: SyncPushRequest): SyncPushResponse {
-		const { ops, syncedClock } = req
+	// Just submit writes, return confirmation (clock)
+	write(scope: Tuple, ops: SyncHistoryEntry[]): WriteResult {
 		const tx = tupleTx(this.db)
+		let operationsApplied = false
 
-		// 1. Apply new operations
 		for (const entry of ops) {
-			// Idempotency check
 			if (tx.get(["seen", entry.metadata.txId])) continue
-
-			tx.set(["seen", entry.metadata.txId], Date.now())
-
-			// Use the semantic syncDb wrapper to execute and log history
-			// We construct a syncDb for the requested scope
-			// AND we pass the metadata from the client entry!
-			const scopeDb = syncDb(tx.subspace(scope), this.reducers, entry.metadata)
 			
-			// We dynamically invoke the method corresponding to the op
-			// This will:
-			// 1. Log history (using the provided metadata)
-			// 2. Call the reducer (writing to data subspace)
-			const method = (scopeDb as any)[entry.op.fn]
-			if (method) {
-				method(...entry.op.args)
+			tx.set(["seen", entry.metadata.txId], Date.now())
+			operationsApplied = true
+
+			const scopeDb = syncDb(tx.subspace(scope), this.reducers, entry.metadata)
+			const reducer = (scopeDb as any)[entry.op.fn]
+			
+			if (reducer) {
+				reducer(...entry.op.args)
 			} else {
 				console.warn(`Unknown operation: ${entry.op.fn}`)
 			}
 		}
 
-		tx.commit()
+		if (operationsApplied) {
+			tx.commit()
+		}
 
-		// 2. Fetch updates
+		// Return current clock
 		const scopeDb = syncDb(this.db.subspace(scope), this.reducers)
-		const history = scopeDb.history(syncedClock)
-		const updates = history.map((h) => h.entry)
+		return { clock: scopeDb.clock() }
+	}
+
+	// Fetch history updates since clock
+	fetch(scope: Tuple, sinceClock: number): FetchResult {
+		const scopeDb = syncDb(this.db.subspace(scope), this.reducers)
+		const updates = scopeDb.history({ gt: [sinceClock] }).map(({ value }) => value)
+		return {
+			clock: scopeDb.clock(),
+			updates
+		}
+	}
+
+	// Composite: Write then Fetch
+	sync(scope: Tuple, ops: SyncHistoryEntry[], syncedClock: number): SyncResult {
+		this.write(scope, ops)
+		return this.fetch(scope, syncedClock)
+	}
+
+	// Composite: Fetch updates and Read data snapshot
+	read(scope: Tuple, range: ListArgs<Tuple>, syncedClock: number): ReadResult {
+		const fetchRes = this.fetch(scope, syncedClock)
+		const scopeDb = syncDb(this.db.subspace(scope), this.reducers)
+		const data = scopeDb.list(range)
 
 		return {
-			serverClock: scopeDb.clock(),
-			updates,
+			...fetchRes,
+			data
 		}
 	}
 }

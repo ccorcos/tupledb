@@ -214,3 +214,66 @@ So to reiterate, the client cache definitely needs to know the server clock for 
 Note that there are two different concepts of subscription now.
 1. The browser client can subscribe to a syncDb clock/history subspace. This simply listens for a clock update and pulls down history to apply it locally.
 2. Inside the browser client is a cache with data ranges and the react components can subscribe to various data ranges that get fetched fom the server if they aren't there. And when data changes in those ranges, those components update. One day we'll optimize this reactivity model with an interval tree.
+
+---
+
+Let's streamline the syncDb api a little bit...
+
+history() should have the same api as list() just on a different subspace. This allows the ability to inspect arbitrary ranges of the history and keeps a general api.
+
+subspace() only seems useful for read methods. So that can reduce to a ReadOnlyTupleDb.
+
+In terms of writes, I don't think we should merge the default reducers with that reducers we pass in. The only writes available are the reducers and perhaps if they're undefined they can default to {set, delete} (and lets just get rid of write for now). This way the abstraction is nice and tight and explicit.
+
+writeSyncOp seems like an unncessary complication / abstraction. We dont need to export it, and the executor thing at the end is just a twisted composition. Lets flatten that out and simply it.
+
+Now looking at the SyncServer...
+
+I don't like the way these functions are named and how things bundle through these json SyncRequest types...
+
+The sync server should just have {read, write} and possibly a {sync} which just composes those two things.
+
+The client can basically call those function directly but there will be a promise in the middle but the network will be seamlessly be abstracted away. However, networks can error so we need to handle that. Perhaps we need to manage whether the user is offline and differnet kinds of errors such as writes getting rejected for one reason or another. I can also imagine the server re-writing some of the data like putting a server timestamp in there or some other server authority override. So lets handle that as well.
+
+
+---
+
+@src/tupledb/SyncDb.ts @src/tupledb/sync/
+
+
+Lets refactor some of the language we're using and tidy up some of the types. Here's what I want.
+
+```ts
+export type CommitMetadata = {
+	id: string
+	authorId?: string // Used for authorization.
+	createdAt: string // ISO string when the client created it
+}
+
+export type Reducer = (tx: TupleDb, args: any) => void
+export type ReducerMap = Record<string, Reducer>
+export type Op = { fn: string; args: any }
+
+export type CommitData = {
+	clock: number
+	commitedAt: string // ISO string when the server wrote it to the database
+	ops: Op[]
+}
+
+export type Commit = CommitMetadata & CommitData
+
+type WriteSyncDb<R extends ReducerMap> = {
+	[K in keyof R]: (args: Parameters<R[K]>[1]) => void
+}
+
+export type SyncDb<R extends ReducerMap> = {
+	clock: () => number
+	history: ReadOnlyTupleDb
+	data: ReadOnlyTupleDb & WriteSyncDb<R>
+}
+```
+
+Lets move src/tupledb/SyncDb.ts and src/tupledb/SyncDb.test.ts into src/tupledb/sync directory. And we need to either rename or consolidate the name conflict with src/tupledb/sync/SyncDb.test.ts which already exists.
+
+
+Lets also add types for SyncClient and SyncServer in types.ts
