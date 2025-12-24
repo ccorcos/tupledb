@@ -277,3 +277,11 @@ Lets move src/tupledb/SyncDb.ts and src/tupledb/SyncDb.test.ts into src/tupledb/
 
 
 Lets also add types for SyncClient and SyncServer in types.ts
+
+---
+
+class SyncServer doesnt have to be a class, just a function. I try to only uses classes when there's state held on that object, and avoid using them when its just gluing things together like we are in SyncServer. Please document this pattern in docs/code-style.md.
+
+Lets also avoid using any when we have type available that works. Like the dataWrapper: any
+
+---

@@ -1,24 +1,15 @@
 import { Cache } from "../Cache"
 import { TupleDb, TupleTx, WriteArgs, ListArgs, Tuple } from "../types"
-import { SyncHistoryEntry, Operation, ReducerMap, syncDb } from "../SyncDb"
-import { SyncResult, ReadResult, WriteResult } from "./types"
+import { defaultReducers } from "./SyncDb"
+import { SyncManagerConfig, Commit, Op, WriteResult, ReducerMap } from "./types"
+import { randomId } from "../../shared/randomId"
 
-export type SyncTransport = {
-	write: (prefix: any[], ops: SyncHistoryEntry[]) => Promise<WriteResult>
-	sync: (prefix: any[], ops: SyncHistoryEntry[], syncedClock: number) => Promise<SyncResult>
-	read: (prefix: any[], range: ListArgs<Tuple>, syncedClock: number) => Promise<ReadResult>
-}
-
-export type SyncManagerConfig = {
-	db: TupleDb
-	reducers: ReducerMap
-	transport: SyncTransport
-}
+export type { SyncManagerConfig } from "./types"
 
 export class SyncManager {
 	db: TupleDb
 	reducers: ReducerMap
-	transport: SyncTransport
+	transport: any
 	cache: Cache<any, any>
 	sessions = new Map<string, SyncSession>()
 
@@ -38,12 +29,14 @@ export class SyncManager {
 	}
 }
 
+type PendingCommit = {
+    commit: Commit
+    cleanup: () => void
+    changes: WriteArgs<any, any>
+}
+
 export class SyncSession {
-	pendingOps: { 
-		entry: SyncHistoryEntry; 
-		cleanup: () => void; 
-		changes: WriteArgs<any, any> 
-	}[] = []
+	pendingCommits: PendingCommit[] = []
 	syncedClock: number = 0
 
 	constructor(
@@ -100,32 +93,32 @@ export class SyncSession {
 		}
 	}
 
-	dispatch(fn: string, ...args: any[]) {
-		const op: Operation = { fn, args }
-		const metadata = { 
-			txId: Math.random().toString(36).slice(2), 
-			timestamp: Date.now() 
+	dispatch(fn: string, args: any) {
+		const op: Op = { fn, args }
+        const now = new Date().toISOString()
+		const commit: Commit = { 
+			id: randomId(),
+            clock: 0, // Will be assigned by server. Local placeholder.
+            commitedAt: now,
+            createdAt: now,
+            ops: [op]
 		}
 
-		let reducer = this.manager.reducers[fn]
-		// Fallback for default reducers
-		if (!reducer && (fn === "set" || fn === "delete")) {
-			if (fn === "set") reducer = (db: any, k: any, v: any) => db.set(k, v)
-			if (fn === "delete") reducer = (db: any, k: any) => db.delete(k)
-		}
+		let reducer = this.manager.reducers[fn] || (defaultReducers as any)[fn]
 		if (!reducer) throw new Error(`Unknown reducer: ${fn}`)
 
 		const writes: WriteArgs<any, any> = { set: [], delete: [] }
 		const proxyTx = this.createProxyTx(writes)
-		const contextTx = Object.create(proxyTx)
-		contextTx.syncMetadata = metadata
-		reducer(contextTx, ...args)
+        const context = Object.create(proxyTx)
+        context.syncMetadata = commit
+        // Reducer signature is (tx, args).
+		reducer(context, args)
 
 		const scopedWrites = this.filterWrites(writes)
 		const cleanup = this.manager.cache.write(scopedWrites)
 
-		this.pendingOps.push({ 
-			entry: { op, metadata }, 
+		this.pendingCommits.push({ 
+			commit, 
 			cleanup, 
 			changes: scopedWrites 
 		})
@@ -184,43 +177,43 @@ export class SyncSession {
 
 		try {
 			while (true) {
-				const entriesToSend = this.pendingOps.map((p) => p.entry)
-				if (entriesToSend.length === 0) break
+				const commitsToSend = this.pendingCommits.map((p) => p.commit)
+				if (commitsToSend.length === 0) break
 
 				const res = await this.manager.transport.sync(
 					this.prefix, 
-					entriesToSend, 
+					commitsToSend, 
 					this.syncedClock
 				)
 
 				this.handleSyncResponse(res.clock, res.updates)
 				
-				const confirmedTxIds = new Set(res.updates.map((u) => u.metadata.txId).filter(Boolean))
-				const remainingOps = this.pendingOps.filter(p => !confirmedTxIds.has(p.entry.metadata.txId))
-				this.pendingOps = []
+				const confirmedIds = new Set(res.updates.map((u) => u.id).filter(Boolean))
+				const remaining = this.pendingCommits.filter(p => !confirmedIds.has(p.commit.id))
+				this.pendingCommits = []
 
-				for (const p of remainingOps) {
+				for (const p of remaining) {
 					// Re-apply optimistic
-					let reducer = this.manager.reducers[p.entry.op.fn]
-					if (!reducer && (p.entry.op.fn === "set" || p.entry.op.fn === "delete")) {
-						if (p.entry.op.fn === "set") reducer = (db: any, k: any, v: any) => db.set(k, v)
-						if (p.entry.op.fn === "delete") reducer = (db: any, k: any) => db.delete(k)
-					}
-					if (!reducer) continue
+                    // Iterate ops
+                    const writes: WriteArgs<any, any> = { set: [], delete: [] }
+                    
+                    for (const op of p.commit.ops) {
+                        let reducer = this.manager.reducers[op.fn] || (defaultReducers as any)[op.fn]
+                        if (!reducer) continue
 
-					const writes: WriteArgs<any, any> = { set: [], delete: [] }
-					const proxyTx = this.createProxyTx(writes)
-					const contextTx = Object.create(proxyTx)
-					contextTx.syncMetadata = p.entry.metadata
-					reducer(contextTx, ...p.entry.op.args)
+                        const proxyTx = this.createProxyTx(writes)
+                        const context = Object.create(proxyTx)
+                        context.syncMetadata = p.commit
+                        reducer(context, op.args)
+                    }
 
 					const scopedWrites = this.filterWrites(writes)
 					const cleanup = this.manager.cache.write(scopedWrites)
-					this.pendingOps.push({ entry: p.entry, cleanup, changes: scopedWrites })
+					this.pendingCommits.push({ commit: p.commit, cleanup, changes: scopedWrites })
 				}
 
-				if (remainingOps.length === entriesToSend.length) break
-				if (this.pendingOps.length === 0) break
+				if (remaining.length === commitsToSend.length) break
+				if (this.pendingCommits.length === 0) break
 			}
 		} catch (e) {
 			console.error("Sync failed", e)
@@ -229,36 +222,34 @@ export class SyncSession {
 		}
 	}
 
-	handleSyncResponse(serverClock: number, updates: SyncHistoryEntry[]) {
-		for (const p of this.pendingOps) {
+	handleSyncResponse(serverClock: number, updates: Commit[]) {
+		for (const p of this.pendingCommits) {
 			p.cleanup()
 		}
 
 		this.syncedClock = serverClock
 		this.manager.db.set([...this.prefix, "clock"], this.syncedClock)
 
-		for (const entry of updates) {
-			this.applyServerUpdate(entry)
+		for (const commit of updates) {
+			this.applyServerUpdate(commit)
 		}
 	}
 
-	applyServerUpdate(entry: SyncHistoryEntry) {
-		let reducer = this.manager.reducers[entry.op.fn]
-		if (!reducer && (entry.op.fn === "set" || entry.op.fn === "delete")) {
-			if (entry.op.fn === "set") reducer = (db: any, k: any, v: any) => db.set(k, v)
-			if (entry.op.fn === "delete") reducer = (db: any, k: any) => db.delete(k)
-		}
-		
-		if (!reducer) {
-			console.warn(`Unknown reducer from server: ${entry.op.fn}`)
-			return
-		}
-
-		const writes: WriteArgs<any, any> = { set: [], delete: [] }
-		const proxyTx = this.createProxyTx(writes) 
-		const contextTx = Object.create(proxyTx)
-		contextTx.syncMetadata = entry.metadata
-		reducer(contextTx, ...entry.op.args)
+	applyServerUpdate(commit: Commit) {
+        const writes: WriteArgs<any, any> = { set: [], delete: [] }
+        const proxyTx = this.createProxyTx(writes)
+        
+        for (const op of commit.ops) {
+            let reducer = this.manager.reducers[op.fn] || (defaultReducers as any)[op.fn]
+            if (!reducer) {
+                console.warn(`Unknown reducer from server: ${op.fn}`)
+                continue
+            }
+            const context = Object.create(proxyTx)
+            context.syncMetadata = commit
+            reducer(context, op.args)
+        }
+        
 		const scopedWrites = this.filterWrites(writes)
 		
 		this.manager.db.write(scopedWrites)

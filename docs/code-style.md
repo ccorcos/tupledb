@@ -131,3 +131,33 @@ export type TupleTx = TupleOkvTx & {
     // ...
 }
 ```
+
+## 6. Functions Over Classes (Closure State)
+
+**Avoid classes unless you are managing stateful object lifecycles.**
+If you are just "gluing" dependencies together (like a database connection and a set of helpers), use a factory function that returns a plain object with methods (closures).
+
+**Rationale:**
+- Simpler to test (no `this` binding issues).
+- Encourages composition.
+- Clearer separation between data and behavior.
+
+**Bad:**
+```ts
+class SyncServer {
+    constructor(private db: TupleDb, private reducers: ReducerMap) {}
+    
+    write(scope, commits) { ... }
+    read(scope, range) { ... }
+}
+```
+
+**Good:**
+```ts
+export function syncServer(db: TupleDb, reducers: ReducerMap) {
+    return {
+        write: (scope, commits) => { ... },
+        read: (scope, range) => { ... }
+    }
+}
+```

@@ -16,6 +16,17 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
+SyncDb direction
+- more general pattern of operations and sync.
+
+list of operations, write them to the database, query them, get upates from syncdb.
+
+
+write my own test examples.
+move syncdb into src
+move recordb into src as well
+
+simple vite app with react for querying.
 
 
 
@@ -25,10 +36,6 @@ Create branches to experiment with new layers and implementations...
 
 
 
-SyncDb direction
-- more general pattern of operations and sync.
-
-list of operations, write them to the database, query them, get upates from syncdb.
 
 
 
