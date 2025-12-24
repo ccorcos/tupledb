@@ -7,23 +7,23 @@
 The system is built as a stack of layers implementing the `Okv<K, V>` interface:
 
 1. Storage Layer (Bottom)
-  * `InMemoryOkv` (`src/tupledb/InMemoryOkv.ts`): Uses a sorted array (`OrderedList`) for storage. Fast, supports rich types.
-  * `SQLiteOkv` (`src/tupledb/SQLiteOkv.ts`): Persists to SQLite. Keys/Values are strings.
+  * `InMemoryOkv` (`src/tupleDb/InMemoryOkv.ts`): Uses a sorted array (`OrderedList`) for storage. Fast, supports rich types.
+  * `SQLiteOkv` (`src/tupleDb/SQLiteOkv.ts`): Persists to SQLite. Keys/Values are strings.
 
-2. Encoding Layer (Middle)@src/tupledb/SyncDb.ts @src/tupledb/sync/
+2. Encoding Layer (Middle)@src/tupleDb/SyncDb.ts @src/tupleDb/sync/
 
-  * Wrappers in `src/tupledb/Encoder.ts` (`KeyEncodeOKV`, `ValueEncodeOKV`) transform keys/values.
+  * Wrappers in `src/tupleDb/Encoder.ts` (`KeyEncodeOKV`, `ValueEncodeOKV`) transform keys/values.
   * Subspaces: Implemented via `TupleSubspaceEncoder`. A subspace is just a prefix-encoded view of the underlying DB.
-  * Codec: `src/tupledb/Codec.ts` handles tuple serialization (`["users", 1] -> "users\x00\x01..."`).
+  * Codec: `src/tupleDb/Codec.ts` handles tuple serialization (`["users", 1] -> "users\x00\x01..."`).
 
 3. Sugar Layer (Top)
-  * `TupleDb` (`src/tupledb/TupleDb.ts`): Adds user-friendly methods (`get`, `set`, `subspace`) on top of `Okv`.
-  * `Transaction` (`src/tupledb/Transaction.ts`): Buffers writes in an `InMemoryOkv` overlay. Reads merge committed data with pending writes.
+  * `TupleDb` (`src/tupleDb/TupleDb.ts`): Adds user-friendly methods (`get`, `set`, `subspace`) on top of `Okv`.
+  * `Transaction` (`src/tupleDb/Transaction.ts`): Buffers writes in an `InMemoryOkv` overlay. Reads merge committed data with pending writes.
 
 ## Key Conventions
 
 ### 1. The `Okv` Interface
-Everything revolves around this interface defined in `src/tupledb/types.ts`:
+Everything revolves around this interface defined in `src/tupleDb/types.ts`:
 
 ```ts
 type Okv<K, V> = {
@@ -52,5 +52,5 @@ New features should generally be implemented as wrappers around `Okv` rather tha
 * Types: Strict TypeScript
 
 ## Directory Structure
-* `src/tupledb/`: Core database logic.
+* `src/tupleDb/`: Core database logic.
 * `src/shared/`: Low-level utilities (comparison, data structures).

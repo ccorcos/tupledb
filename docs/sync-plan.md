@@ -52,7 +52,7 @@ The client is designed for optimistic interaction.
 ### State Management
 - **Confirmed State**: The state derived from operations confirmed by the server (persisted in local `TupleDb`).
 - **Pending State**: Operations generated locally but not yet acknowledged by the server.
-- **Cache Layer**: A `Cache` instance (from `@src/tupledb/Cache.ts`) sits on top. It serves reads and tracks range queries.
+- **Cache Layer**: A `Cache` instance (from `@src/tupleDb/Cache.ts`) sits on top. It serves reads and tracks range queries.
 
 ### The "Sync Loop"
 The client maintains a `syncedClock`.
@@ -151,7 +151,7 @@ Pure history sync works for updates, but initial load needs data.
 - **Disconnect Test**: Perform ops while "offline", then reconnect and verify sync.
 
 ## 6. Directory Structure
-- `src/tupledb/sync/SyncClient.ts`
-- `src/tupledb/sync/SyncServer.ts`
-- `src/tupledb/sync/types.ts`
-- `src/tupledb/sync/react.ts`
+- `src/tupleDb/sync/SyncClient.ts`
+- `src/tupleDb/sync/SyncServer.ts`
+- `src/tupleDb/sync/types.ts`
+- `src/tupleDb/sync/react.ts`

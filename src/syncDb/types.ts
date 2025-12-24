@@ -1,4 +1,4 @@
-import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb } from "../tupledb/types"
+import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb } from "../tupleDb/types"
 
 // ==========================================================================
 // Sync Core Types

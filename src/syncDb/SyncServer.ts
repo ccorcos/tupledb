@@ -1,5 +1,5 @@
-import { tupleTx } from "../tupledb/TupleDb"
-import { TupleDb, Tuple, ListArgs } from "../tupledb/types"
+import { tupleTx } from "../tupleDb/TupleDb"
+import { TupleDb, Tuple, ListArgs } from "../tupleDb/types"
 import { syncDb, defaultReducers } from "./SyncDb"
 import { SyncResult, ReadResult, WriteResult, FetchResult, SyncServer, ReducerMap, Commit } from "./types"
 

@@ -1,6 +1,6 @@
 import { cloneDeep, isEqual, union } from "lodash-es"
 import { compactObj } from "../shared/compactObj"
-import { ListArgs, Tuple, TupleDb } from "../tupledb/types"
+import { ListArgs, Tuple, TupleDb } from "../tupleDb/types"
 
 // ============================================================================
 // Types

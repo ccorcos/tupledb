@@ -1,11 +1,11 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { tupleDb } from "../tupledb/TupleDb"
+import { tupleDb } from "../tupleDb/TupleDb"
 import { SyncManager } from "./SyncClient"
 import { syncServer } from "./SyncServer"
 import { SyncResult, ReadResult, WriteResult, SyncServer, Commit } from "./types"
 import { syncDb } from "./SyncDb"
-import { ListArgs, Tuple } from "../tupledb/types"
+import { ListArgs, Tuple } from "../tupleDb/types"
 
 // Mock transport
 const createTransport = (server: SyncServer) => {

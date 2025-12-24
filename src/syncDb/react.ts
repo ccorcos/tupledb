@@ -1,7 +1,7 @@
 import { useSyncExternalStore, useMemo } from "react"
 import { SyncManager, SyncSession } from "./SyncClient"
-import { ListArgs } from "../tupledb/types"
-import { EncodeSubspaceListArgs, KeyDecodeCacheListResult, TupleSubspaceEncoder } from "../tupledb/Encoder"
+import { ListArgs } from "../tupleDb/types"
+import { EncodeSubspaceListArgs, KeyDecodeCacheListResult, TupleSubspaceEncoder } from "../tupleDb/Encoder"
 
 export function useList(session: SyncSession, path: any[], args: ListArgs<any> = {}) {
     // The session manages data at `[...session.prefix, "data"]`.

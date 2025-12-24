@@ -9,12 +9,20 @@ Create branches to experiment with new layers and implementations...
 - deferred eventually consistent job updates or whatever queue.
 
 
-@src/tupledb/RecordLayer.ts
-
-@src/tupledb/SyncDb.ts @src/tupledb/sync/
-
-
 ---
+
+
+write my own test examples for syncDb and feel how it works.
+
+create a sync-demo vite project.
+
+
+can we piece all of this together somehow like this?
+-> recordDb(syncDb(db.subspace(["user", id]), reducers).data)
+
+
+
+
 
 SyncDb direction
 - more general pattern of operations and sync.
@@ -22,19 +30,16 @@ SyncDb direction
 list of operations, write them to the database, query them, get upates from syncdb.
 
 
-move syncdb into src
-move recordb into src as well
-
-
-help me rename src/tupledb to src/tupleDb where the capital D matters. I know this can be tricky with git and unix systems.
 
 
 
 
 
-write my own test examples.
 
-create simple vite app with react for querying.
+
+
+
+
 
 
 

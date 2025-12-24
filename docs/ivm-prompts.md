@@ -108,7 +108,7 @@ export type RecordDb = {
 
 ---
 
-I want to think about improvements to @src/tupledb/RecordLayer.ts . What are some important missing features. What are some of the  ways we could improve the way we're specifying indexes, aggregations, and joins. I want you to do some research into an existing  implementation of IVM in mono/packages/zql/src/ivm and use that as inspiration for improving the record layer implementation. Note  that we don't want to use any of the zql code directly, but we do want to be inspired by their implementation details and ways we can improve our implementation. Please write you analysis in plans/zql.md for review.
+I want to think about improvements to @src/tupleDb/RecordLayer.ts . What are some important missing features. What are some of the  ways we could improve the way we're specifying indexes, aggregations, and joins. I want you to do some research into an existing  implementation of IVM in mono/packages/zql/src/ivm and use that as inspiration for improving the record layer implementation. Note  that we don't want to use any of the zql code directly, but we do want to be inspired by their implementation details and ways we can improve our implementation. Please write you analysis in plans/zql.md for review.
 
 ---
 
@@ -145,7 +145,7 @@ Write a couple of different join queries:
 ---
 
 
-Regarding @src/tupledb/RecordLayer.ts, please refactor things to be cleaner and more concise. `processQuery` is a really long function that feels like it could be broken up. And it's not super clear the process of finding indexes, checking if they're a perfect match, if not a perfect match (only partial), then we'll want to generate and backfill the perfect index, and we should backfill by scanning over the best index we can find. Aggregations and joins feel like they're different enough that they should have their own factored out logic.
+Regarding @src/tupleDb/RecordLayer.ts, please refactor things to be cleaner and more concise. `processQuery` is a really long function that feels like it could be broken up. And it's not super clear the process of finding indexes, checking if they're a perfect match, if not a perfect match (only partial), then we'll want to generate and backfill the perfect index, and we should backfill by scanning over the best index we can find. Aggregations and joins feel like they're different enough that they should have their own factored out logic.
 
 
 ---
@@ -288,7 +288,7 @@ This should look more like. No recursion!
 ---
 
 
-I want to think through some improvements to the way Query works in @src/tupledb/RecordLayer.ts
+I want to think through some improvements to the way Query works in @src/tupleDb/RecordLayer.ts
 
 
 1. We need an ability to add comparisons.
@@ -558,4 +558,4 @@ aggregation index:
 
 ---
 
-implement @docs/query-syntax-v5.md on @src/tupledb/RecordLayer.ts and update the tests in @src/tupledb/RecordLayer.test.ts and make sure to include the examples in v5.md as tests.
+implement @docs/query-syntax-v5.md on @src/tupleDb/RecordLayer.ts and update the tests in @src/tupleDb/RecordLayer.test.ts and make sure to include the examples in v5.md as tests.

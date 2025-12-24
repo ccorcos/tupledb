@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
 import { syncDb } from "./SyncDb"
 import { Commit } from "./types"
-import { tupleDb } from "../tupledb/TupleDb"
+import { tupleDb } from "../tupleDb/TupleDb"
 
 describe("Syncable", () => {
 	it("basic write tracking", () => {

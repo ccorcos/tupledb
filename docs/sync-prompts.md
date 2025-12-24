@@ -11,7 +11,7 @@ function sendMessage(tx, message) {
 		syncDb(tx.subspace(["person", person])).set(["inbox", message.id], message)
 }
 
-On the client, we want to reuse much of the logic from @src/tupledb/Cache.test.ts to keep track of what ranges we've actualy read within each syncDb. We also need the reactivity layer, and need the ability to sync with the server to pull down new operations. After applying the operations on the client which should denormalize into the various indexes, we can prune out any writes to indexes that we aren't subscribed to.
+On the client, we want to reuse much of the logic from @src/tupleDb/Cache.test.ts to keep track of what ranges we've actualy read within each syncDb. We also need the reactivity layer, and need the ability to sync with the server to pull down new operations. After applying the operations on the client which should denormalize into the various indexes, we can prune out any writes to indexes that we aren't subscribed to.
 
 The client api should feel something like...
 
@@ -30,7 +30,7 @@ db.write({fn: "sendMessage", args: [{id, recipients, body}]})
 
 We also need to be able to inspect history so we can render it and know whether or not the history is optimistic or has been successfully written to the server.
 
-I've written some existing logic in  @src/tupledb/SyncDb.ts but its still pretty minimal and doesnt include any API logic for actual syncing and isnt integrated with the cachen either.
+I've written some existing logic in  @src/tupleDb/SyncDb.ts but its still pretty minimal and doesnt include any API logic for actual syncing and isnt integrated with the cachen either.
 
 Please write docs/sync-plan.md with a planf ro how we should do this. Think very carefully about the developer experience and API for using this. Mock and test the async interface with the server with request failure tolerance. And make sure the cache tracks things correctly, purges unused data, and handles syncing upon reconnection.
 
@@ -40,7 +40,7 @@ This looks like a great start. But it doesnâ€™t quite fulfill the entire goal Iâ
 
 ---
 
-@src/tupledb/SyncDb.ts @src/tupledb/sync/
+@src/tupleDb/SyncDb.ts @src/tupleDb/sync/
 
 
 I have some ideas for improvement here but it doesnt entirely fit together. Help me figure this out. Lets take a step by step approach and carefully consider the API. I want things to light and simple and composable rather than a mega api that wraps everything and obscures whats going on under the hood.
@@ -238,7 +238,7 @@ The client can basically call those function directly but there will be a promis
 
 ---
 
-@src/tupledb/SyncDb.ts @src/tupledb/sync/
+@src/tupleDb/SyncDb.ts @src/tupleDb/sync/
 
 
 Lets refactor some of the language we're using and tidy up some of the types. Here's what I want.
@@ -273,7 +273,7 @@ export type SyncDb<R extends ReducerMap> = {
 }
 ```
 
-Lets move src/tupledb/SyncDb.ts and src/tupledb/SyncDb.test.ts into src/tupledb/sync directory. And we need to either rename or consolidate the name conflict with src/tupledb/sync/SyncDb.test.ts which already exists.
+Lets move src/tupleDb/SyncDb.ts and src/tupleDb/SyncDb.test.ts into src/tupleDb/sync directory. And we need to either rename or consolidate the name conflict with src/tupleDb/sync/SyncDb.test.ts which already exists.
 
 
 Lets also add types for SyncClient and SyncServer in types.ts
