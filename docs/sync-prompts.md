@@ -285,3 +285,46 @@ class SyncServer doesnt have to be a class, just a function. I try to only uses 
 Lets also avoid using any when we have type available that works. Like the dataWrapper: any
 
 ---
+
+
+Lets flatten out the write abstraction on SyncDb.
+
+This is what it was before.
+export type SyncDb<R extends ReducerMap> = {
+	clock: () => number
+	history: ReadOnlyTupleDb
+	data: ReadOnlyTupleDb & WriteSyncDb<R>
+}
+
+After I want to to be more like this:
+export type SyncDb<R extends ReducerMap> = {
+	clock: () => number
+	history: ReadOnlyTupleDb
+	data: ReadOnlyTupleDb
+} & WriteSyncDb<R>
+
+
+Metadata for writes is happening in the wrong place. We shouldn't pass the tx metadata when constructing the syncDb. It should be on write. Lets implement something like this.
+
+const userDb = syncDb(db.subspace(["user", userId]), userReducers)
+const historyItem = userDb.write({...metadata, ops})
+
+Or we can use a transaction style for more ergonomic and typed usage.
+const tx = syncTx(userDb, metadata)
+tx.sendMessage({...})
+tx.commit()
+
+
+I want to think about how to sync to a full replica. We're using logical replication...
+
+const db1 = syncDb(a)
+const db2 = syncDb(b)
+
+function replicate() {
+	const history = db1.history({gt: [db2.clock()]})
+	for (const item of history) db2.write(item)
+}
+
+This feels pretty clean. However, write needs to handle two different functionalities. If the argument is a client transaciton, it needs to fill in the commitedAt and the clock value and return the actual history item after potentially modifying the data. However, if the clock value is there, then we can assume this is a server transaction and we should throw an error if that values are off...
+
+Syncing to a partial replica required using the sync client and the underlying cache. This is a bit trickier because we need to handle optimistic writes.

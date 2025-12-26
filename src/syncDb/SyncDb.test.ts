@@ -1,10 +1,10 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
+import { tupleDb } from "../tupleDb/TupleDb"
 import { syncDb } from "./SyncDb"
 import { Commit } from "./types"
-import { tupleDb } from "../tupleDb/TupleDb"
 
-describe("Syncable", () => {
+describe("SyncDb", () => {
 	it("basic write tracking", () => {
 		const db = tupleDb()
 		const user = syncDb(db)
@@ -23,7 +23,7 @@ describe("Syncable", () => {
 		// Check history
 		const history = user.history.list()
 		assert.equal(history.length, 1)
-        const commit = history[0].value as Commit
+		const commit = history[0].value as Commit
 		assert.equal(commit.clock, 1)
 		assert.deepEqual(commit.ops[0], { fn: "set", args: { key: ["name"], value: "chet" } })
 	})
@@ -47,7 +47,7 @@ describe("Syncable", () => {
 
 		const history = user.history.list()
 		assert.equal(history.length, 1)
-        const commit = history[0].value as Commit
+		const commit = history[0].value as Commit
 		assert.deepEqual(commit.ops[0], { fn: "write", args: batch })
 	})
 
@@ -57,27 +57,27 @@ describe("Syncable", () => {
 			inc: (tx: any, key: any) => {
 				const val = (tx.get(key) as number) || 0
 				tx.set(key, val + 1)
-			}
+			},
 		}
 		const user = syncDb(db, reducers)
 
 		user.data.inc(["count"])
 
 		assert.equal(user.data.get(["count"]), 1)
-		
+
 		const history = user.history.list()
 		assert.equal(history.length, 1)
-        const commit = history[0].value as Commit
+		const commit = history[0].value as Commit
 		assert.deepEqual(commit.ops[0], { fn: "inc", args: ["count"] })
 	})
 
 	it("subspaces form independent sync units", () => {
 		const db = tupleDb()
 		const user = syncDb(db)
-		
-        // To get a scoped SyncDb, we wrap the subspace
-        const inboxDb = db.subspace(["inbox"])
-        const inbox = syncDb(inboxDb)
+
+		// To get a scoped SyncDb, we wrap the subspace
+		const inboxDb = db.subspace(["inbox"])
+		const inbox = syncDb(inboxDb)
 
 		inbox.data.set({ key: ["msg1"], value: "hello" })
 
