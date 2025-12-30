@@ -1,84 +1,76 @@
+import { readOnlyTupleDb, tupleTx } from "tupleDb/TupleDb"
 import { randomId } from "../shared/randomId"
-import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb } from "../tupleDb/types"
-import { Commit, SyncDb, ReducerMap, WriteSyncDb } from "./types"
+import { JSONValue, Tuple, TupleDb, WriteArgs } from "../tupleDb/types"
+import { Commit, CommitMetadata, Op, ReducerMap, SyncDb } from "./types"
 
 // Default reducers
 export const defaultReducers = {
 	set: (db: TupleDb, { key, value }: { key: Tuple; value: any }) => db.set(key, value),
 	delete: (db: TupleDb, key: Tuple) => db.delete(key),
-	write: (db: TupleDb, args: any) => db.write(args),
+	batch: (db: TupleDb, args: WriteArgs<Tuple, JSONValue>) => db.write(args),
 }
 
-export function syncDb<R extends ReducerMap>(
-	db: TupleDb,
-	reducers?: R,
-	defaultMetadata: Partial<Commit> = {}
-): SyncDb<R> {
-	const dataSpace = db.subspace(["data"])
-	const historySpace = db.subspace(["history"])
+export function syncDb<R extends ReducerMap>(db: TupleDb): SyncDb<typeof defaultReducers>
+export function syncDb<R extends ReducerMap>(db: TupleDb, reducers: R): SyncDb<R>
+export function syncDb<R extends ReducerMap>(db: TupleDb, reducers?: R | undefined): SyncDb<R> {
+	if (!reducers) reducers = defaultReducers as any
 
-	const effectiveReducers = { ...defaultReducers, ...reducers } as unknown as R
+	const write = (args: (Partial<CommitMetadata> & { ops: Op[] }) | Commit): Commit => {
+		// TODO: should this not be in a transaction?
+		const tx = tupleTx(db)
 
-	const dataWrapper = {
-		// ReadOnlyTupleDb methods
-		get: (key: Tuple) => dataSpace.get(key),
-		has: (key: Tuple) => dataSpace.has(key),
-		list: (args?: ListArgs<Tuple>) => dataSpace.list(args),
-		compare: db.compare,
-		subspace: (prefix: Tuple) => {
-			// Read-only subspace
-			const sub = dataSpace.subspace(prefix)
-			return {
-				get: sub.get,
-				has: sub.has,
-				list: sub.list,
-				compare: sub.compare,
-				subspace: sub.subspace,
+		const clock = (tx.get(["clock"]) as number) ?? 0
+
+		let commit: Commit
+
+		// Check if it's a full Commit (Replication) or New Commit (Local)
+		if ("clock" in args && typeof args.clock === "number") {
+			const nextClock = clock + 1
+			if (args.clock !== nextClock) {
+				throw new Error(`Clock mismatch. Expected ${nextClock}, got ${args.clock}`)
 			}
-		},
-	} as ReadOnlyTupleDb & WriteSyncDb<R>
-
-	// Bind Reducers
-	for (const [name, fn] of Object.entries(effectiveReducers)) {
-		(dataWrapper as any)[name] = (args: any) => {
-			const clock = (db.get(["clock"]) as number) ?? 0
+			// TODO: more validation.
+			commit = args as Commit
+		} else {
 			const nextClock = clock + 1
 			const now = new Date().toISOString()
-
-			const commit: Commit = {
-				id: defaultMetadata.id || randomId(),
-				authorId: defaultMetadata.authorId,
-				createdAt: defaultMetadata.createdAt || now,
+			commit = {
+				id: args.id || randomId(),
+				authorId: args.authorId,
+				createdAt: args.createdAt || now,
 				clock: nextClock,
 				commitedAt: now,
-				ops: [{ fn: name, args }],
+				ops: args.ops,
 			}
-
-			// Log history
-			db.set(["history", nextClock], commit)
-			// Increment clock
-			db.set(["clock"], nextClock)
-
-			// Execute reducer on data subspace
-			// We pass dataSpace as 'tx' to the reducer
-			const context = Object.create(dataSpace)
-			context.syncMetadata = commit
-			;(fn as Function)(context, args)
 		}
+
+		// Write to history
+		tx.set(["history", commit.clock], commit)
+		tx.set(["clock"], commit.clock)
+
+		// Apply ops
+		for (const op of commit.ops) {
+			const fn = (reducers as any)[op.fn]
+			if (!fn) throw new Error(`Unknown reducer: ${op.fn}`)
+			fn(tx, op.args)
+		}
+
+		tx.commit()
+
+		return commit
 	}
 
-	// History Wrapper (ReadOnly)
-	const historyWrapper: ReadOnlyTupleDb = {
-		get: (key: Tuple) => historySpace.get(key),
-		has: (key: Tuple) => historySpace.has(key),
-		list: (args?: ListArgs<Tuple>) => historySpace.list(args),
-		compare: db.compare,
-		subspace: (prefix: Tuple) => historySpace.subspace(prefix) as any, // Cast because subspace returns TupleDb but we want ReadOnly
+	const writeMethods: any = {}
+	for (const name in reducers) {
+		writeMethods[name] = (args: any) => write({ ops: [{ fn: name, args }] })
 	}
 
-	return {
+	const instance = {
 		clock: () => (db.get(["clock"]) as number) ?? 0,
-		history: historyWrapper,
-		data: dataWrapper,
-	}
+		write,
+		history: readOnlyTupleDb(db.subspace(["history"])),
+		data: readOnlyTupleDb(db.subspace(["data"])),
+	} as SyncDb<R>
+
+	return { ...writeMethods, ...instance } as SyncDb<R>
 }

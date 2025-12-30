@@ -89,9 +89,9 @@ describe("SyncDb Integration", () => {
 
 		// Pre-populate server with data
 		const serverUserDb = syncDb(serverDb.subspace(["user", 1]), reducers)
-		serverUserDb.data.setDoc([["doc", "1"], "v1"]) // clock 1
-		serverUserDb.data.setDoc([["doc", "2"], "v2"]) // clock 2
-		serverUserDb.data.setDoc([["doc", "3"], "v3"]) // clock 3
+		serverUserDb.setDoc([["doc", "1"], "v1"]) // clock 1
+		serverUserDb.setDoc([["doc", "2"], "v2"]) // clock 2
+		serverUserDb.setDoc([["doc", "3"], "v3"]) // clock 3
 
 		const clientDb = tupleDb()
 		const manager = new SyncManager({

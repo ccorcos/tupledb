@@ -12,7 +12,7 @@ describe("SyncDb", () => {
 		assert.equal(user.clock(), 0)
 
 		// 'set' is a default reducer
-		user.data.set({ key: ["name"], value: "chet" })
+		user.set({ key: ["name"], value: "chet" })
 
 		// Check clock incremented
 		assert.equal(user.clock(), 1)
@@ -39,7 +39,7 @@ describe("SyncDb", () => {
 			],
 			delete: [["c"]],
 		}
-		user.data.write(batch)
+		user.batch(batch)
 
 		assert.equal(user.clock(), 1)
 		assert.equal(user.data.get(["a"]), 1)
@@ -48,7 +48,7 @@ describe("SyncDb", () => {
 		const history = user.history.list()
 		assert.equal(history.length, 1)
 		const commit = history[0].value as Commit
-		assert.deepEqual(commit.ops[0], { fn: "write", args: batch })
+		assert.deepEqual(commit.ops[0], { fn: "batch", args: batch })
 	})
 
 	it("custom reducers", () => {
@@ -61,7 +61,7 @@ describe("SyncDb", () => {
 		}
 		const user = syncDb(db, reducers)
 
-		user.data.inc(["count"])
+		user.inc(["count"])
 
 		assert.equal(user.data.get(["count"]), 1)
 
@@ -79,7 +79,7 @@ describe("SyncDb", () => {
 		const inboxDb = db.subspace(["inbox"])
 		const inbox = syncDb(inboxDb)
 
-		inbox.data.set({ key: ["msg1"], value: "hello" })
+		inbox.set({ key: ["msg1"], value: "hello" })
 
 		// Check clocks are independent
 		assert.equal(user.clock(), 0)

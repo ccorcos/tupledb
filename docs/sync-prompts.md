@@ -328,3 +328,6 @@ function replicate() {
 This feels pretty clean. However, write needs to handle two different functionalities. If the argument is a client transaciton, it needs to fill in the commitedAt and the clock value and return the actual history item after potentially modifying the data. However, if the clock value is there, then we can assume this is a server transaction and we should throw an error if that values are off...
 
 Syncing to a partial replica required using the sync client and the underlying cache. This is a bit trickier because we need to handle optimistic writes.
+
+---
+

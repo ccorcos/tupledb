@@ -29,8 +29,9 @@ export type WriteSyncDb<R extends ReducerMap> = {
 export type SyncDb<R extends ReducerMap> = {
 	clock: () => number
 	history: ReadOnlyTupleDb
-	data: ReadOnlyTupleDb & WriteSyncDb<R>
-}
+	data: ReadOnlyTupleDb
+	write: (commit: (Partial<CommitMetadata> & { ops: Op[] }) | Commit) => Commit
+} & WriteSyncDb<R>
 
 // ==========================================================================
 // Sync Transport / Server Types

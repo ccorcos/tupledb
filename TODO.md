@@ -11,6 +11,20 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
+Look at integration test and example test.
+
+
+SyncExample.test.ts
+- read replica to another computer
+- client cache partial read-write replica
+- http and p2p transport option
+
+- handling authorization / validation errors
+
+- demo project. todomvc, messaging, history, offline, etc.
+
+
+
 
 write my own test examples for syncDb and feel how it works.
 
