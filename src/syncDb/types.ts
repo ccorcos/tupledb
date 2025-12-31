@@ -4,17 +4,28 @@ import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb } from "../tupleDb/types"
 // Sync Core Types
 // ==========================================================================
 
-export type Reducer = (tx: TupleDb, args: any) => void
+export type Reducer = (tx: TupleDb, ...args: any[]) => void
 export type ReducerMap = Record<string, Reducer>
+
+// Helper to extract args parameters (dropping the first 'tx' argument)
+type ReducerArgs<F extends Reducer> = F extends (tx: any, ...args: infer A) => any ? A : never
+
 export type Op<R extends ReducerMap = any> = {
 	fn: keyof R
-	args: Parameters<R[keyof R]>[1]
+	args: ReducerArgs<R[keyof R]>
 }
 
-export type CommitArgs<R extends ReducerMap = ReducerMap> = {
+export type OpsBuilder<R extends ReducerMap> = {
+	[K in keyof R]: (...args: ReducerArgs<R[K]>) => void
+}
+
+export type CommitMeta = {
 	id?: string
 	authorId?: string
 	createdAt?: string
+}
+
+export type CommitArgs<R extends ReducerMap = ReducerMap> = CommitMeta & {
 	ops: Op<R>[]
 }
 
@@ -31,11 +42,11 @@ export type SyncDb<R extends ReducerMap> = {
 	clock: () => number
 	history: ReadOnlyTupleDb
 	data: ReadOnlyTupleDb
-	write: (commit: CommitArgs<R> | Commit<R>) => Commit<R>
-}
-
-export type WriteSyncDb<R extends ReducerMap> = {
-	[K in keyof R]: (args: Parameters<R[K]>[1]) => void
+	write: {
+		(commit: CommitArgs<R> | Commit<R>): Commit<R>
+		(meta: CommitMeta, build: (ops: OpsBuilder<R>) => void): Commit<R>
+		(build: (ops: OpsBuilder<R>) => void): Commit<R>
+	}
 }
 
 // ==========================================================================

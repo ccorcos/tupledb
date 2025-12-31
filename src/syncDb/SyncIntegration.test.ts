@@ -90,13 +90,13 @@ describe("SyncDb Integration", () => {
 		// Pre-populate server with data
 		const serverUserDb = syncDb(serverDb.subspace(["user", 1]), reducers)
 		serverUserDb.write({
-			ops: [{ fn: "setDoc", args: [["doc", "1"], "v1"] }],
+			ops: [{ fn: "setDoc", args: [[["doc", "1"], "v1"]] }],
 		})
 		serverUserDb.write({
-			ops: [{ fn: "setDoc", args: [["doc", "2"], "v2"] }],
+			ops: [{ fn: "setDoc", args: [[["doc", "2"], "v2"]] }],
 		})
 		serverUserDb.write({
-			ops: [{ fn: "setDoc", args: [["doc", "3"], "v3"] }],
+			ops: [{ fn: "setDoc", args: [[["doc", "3"], "v3"]] }],
 		})
 
 		const clientDb = tupleDb()
@@ -178,14 +178,14 @@ describe("SyncDb Integration", () => {
 				clock: 0,
 				commitedAt: "",
 				createdAt: now,
-				ops: [{ fn: "log", args: "recovered 1" }],
+				ops: [{ fn: "log", args: ["recovered 1"] }],
 			},
 			{
 				id: "tx2",
 				clock: 0,
 				commitedAt: "",
 				createdAt: now,
-				ops: [{ fn: "log", args: "recovered 2" }],
+				ops: [{ fn: "log", args: ["recovered 2"] }],
 			},
 		]
 
@@ -199,7 +199,7 @@ describe("SyncDb Integration", () => {
 		assert.equal(history.length, 2)
 		const c1 = history[0].value as Commit
 		const c2 = history[1].value as Commit
-		assert.deepEqual(c1.ops[0].args, "recovered 1")
-		assert.deepEqual(c2.ops[0].args, "recovered 2")
+		assert.deepEqual(c1.ops[0].args, ["recovered 1"])
+		assert.deepEqual(c2.ops[0].args, ["recovered 2"])
 	})
 })

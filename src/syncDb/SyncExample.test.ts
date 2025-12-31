@@ -35,24 +35,20 @@ describe("SyncDb Example", () => {
 		// ======================================================================
 
 		// To perform a write, we use the SyncDb instance.
-		// We can use the generated methods (setUser) which create a commit internally.
+		// We can use the builder pattern for ergonomics.
 		const user1Db = createUserDb(db, "user1")
-		user1Db.write({
-			authorId: "user1",
-			ops: [{ fn: "setUser", args: { id: "user1", name: "John" } }],
+		user1Db.write({ authorId: "user1" }, (ops) => {
+			ops.setUser({ id: "user1", name: "John" })
 		})
 
-		// Or we can explicitly call write for more control (e.g. metadata)
+		// Or we can explicitly call write with ops array
 		const user2Db = createUserDb(db, "user2")
-		user2Db.write({
-			authorId: "user2",
-			ops: [{ fn: "setUser", args: { id: "user2", name: "Jane" } }],
-		})
+		user2Db.write({ authorId: "user2" }, (ops) => ops.setUser({ id: "user2", name: "Jane" }))
 
 		const user3Db = createUserDb(db, "user3")
 		user3Db.write({
 			authorId: "user3",
-			ops: [{ fn: "setUser", args: { id: "user3", name: "Jim" } }],
+			ops: [{ fn: "setUser", args: [{ id: "user3", name: "Jim" }] }],
 		})
 
 		// Verify data
@@ -74,18 +70,16 @@ describe("SyncDb Example", () => {
 		const sendMsgTx = (msg: Message) => {
 			// 1. Sender's Outbox
 			const senderDb = createUserDb(db, msg.fromId)
-			senderDb.write({
-				authorId: msg.fromId,
-				ops: [{ fn: "setMessage", args: msg }],
+			senderDb.write({ authorId: msg.fromId }, (ops) => {
+				ops.setMessage(msg)
 			})
 
 			// 2. Recipients' Inboxes
 			for (const userId of msg.toId) {
 				const recipientDb = createUserDb(db, userId)
 				// We can include causal info or original author in metadata
-				recipientDb.write({
-					authorId: msg.fromId,
-					ops: [{ fn: "setMessage", args: msg }],
+				recipientDb.write({ authorId: msg.fromId }, (ops) => {
+					ops.setMessage(msg)
 				})
 			}
 		}
@@ -111,7 +105,7 @@ describe("SyncDb Example", () => {
 			for (const { value } of newCommits) {
 				const commit = value as Commit
 				// We apply the commit exactly as is (preserving clock, timestamp, etc.)
-				replica.write(commit)
+				replica.write(commit as any)
 			}
 		}
 
@@ -135,16 +129,15 @@ describe("SyncDb Example", () => {
 		// A. Pull from Server (Initial Sync)
 		const serverHistory = user1Db.history.list({ gt: [clientUser1.clock()] })
 		for (const { value } of serverHistory) {
-			clientUser1.write(value as Commit)
+			clientUser1.write(value as any)
 		}
 
 		assert.equal(clientUser1.clock(), user1Db.clock())
 		assert.deepEqual(clientUser1.data.get([]), { id: "user1", name: "John" })
 
 		// B. Client makes Offline Write
-		clientUser1.write({
-			authorId: "user1",
-			ops: [{ fn: "setUser", args: { id: "user1", name: "John Doe" } }],
+		clientUser1.write({ authorId: "user1" }, (ops) => {
+			ops.setUser({ id: "user1", name: "John Doe" })
 		})
 
 		// Client clock increments locally
@@ -163,7 +156,7 @@ describe("SyncDb Example", () => {
 			// Here we just accept the write.
 			user1Db.write({
 				id: localCommit.id, // Preserve ID for idempotency/tracking
-				ops: localCommit.ops,
+				ops: localCommit.ops as any,
 			})
 		}
 

@@ -93,7 +93,7 @@ export class SyncSession {
 		}
 	}
 
-	dispatch(fn: string, args: any) {
+	dispatch(fn: string, ...args: any[]) {
 		const op: Op = { fn, args }
         const now = new Date().toISOString()
 		const commit: Commit = { 
@@ -111,8 +111,8 @@ export class SyncSession {
 		const proxyTx = this.createProxyTx(writes)
         const context = Object.create(proxyTx)
         context.syncMetadata = commit
-        // Reducer signature is (tx, args).
-		reducer(context, args)
+        // Reducer signature is (tx, ...args).
+		reducer(context, ...args)
 
 		const scopedWrites = this.filterWrites(writes)
 		const cleanup = this.manager.cache.write(scopedWrites)
@@ -204,7 +204,7 @@ export class SyncSession {
                         const proxyTx = this.createProxyTx(writes)
                         const context = Object.create(proxyTx)
                         context.syncMetadata = p.commit
-                        reducer(context, op.args)
+                        reducer(context, ...op.args)
                     }
 
 					const scopedWrites = this.filterWrites(writes)
@@ -247,7 +247,7 @@ export class SyncSession {
             }
             const context = Object.create(proxyTx)
             context.syncMetadata = commit
-            reducer(context, op.args)
+            reducer(context, ...op.args)
         }
         
 		const scopedWrites = this.filterWrites(writes)

@@ -1,11 +1,11 @@
 import { readOnlyTupleDb, tupleTx } from "tupleDb/TupleDb"
 import { randomId } from "../shared/randomId"
 import { Tuple, TupleDb } from "../tupleDb/types"
-import { Commit, CommitArgs, ReducerMap, SyncDb } from "./types"
+import { Commit, CommitArgs, Op, ReducerMap, SyncDb } from "./types"
 
 // Default reducers
 export const defaultReducers = {
-	set: (db: TupleDb, { key, value }: { key: Tuple; value: any }) => db.set(key, value),
+	set: (db: TupleDb, key: Tuple, value: any) => db.set(key, value),
 	delete: (db: TupleDb, key: Tuple) => db.delete(key),
 }
 
@@ -14,7 +14,26 @@ export function syncDb<R extends ReducerMap>(db: TupleDb, reducers: R): SyncDb<R
 export function syncDb<R extends ReducerMap>(db: TupleDb, reducers?: R | undefined): SyncDb<R> {
 	if (!reducers) reducers = defaultReducers as any
 
-	const write = (args: CommitArgs<R> | Commit<R>): Commit<R> => {
+	const write = (arg1: any, arg2?: any): Commit<R> => {
+		let args: CommitArgs<R> | Commit<R>
+
+		if (arg1 && typeof arg1 === "object" && "ops" in arg1) {
+			args = arg1
+		} else {
+			const meta = typeof arg1 === "function" ? {} : arg1
+			const build = typeof arg1 === "function" ? arg1 : arg2
+
+			if (typeof build !== "function") throw new Error("Invalid write arguments")
+
+			const ops: Op<R>[] = []
+			const builder: any = {}
+			for (const key in reducers) {
+				builder[key] = (...fnArgs: any[]) => ops.push({ fn: key, args: fnArgs } as any)
+			}
+			build(builder)
+			args = { ...meta, ops }
+		}
+
 		// TODO: should this not be in a transaction?
 		const tx = tupleTx(db)
 
@@ -51,18 +70,13 @@ export function syncDb<R extends ReducerMap>(db: TupleDb, reducers?: R | undefin
 		for (const op of commit.ops) {
 			const fn = reducers![op.fn]
 			if (!fn) throw new Error(`Unknown reducer: ${op.fn as string}`)
-			fn(tx.subspace(["data"]), op.args)
+			fn(tx.subspace(["data"]), ...op.args)
 		}
 
 		tx.commit()
 
 		return commit
 	}
-
-	// const writeMethods: any = {}
-	// for (const name in reducers) {
-	// 	writeMethods[name] = (args: any) => write({ ops: [{ fn: name, args }] })
-	// }
 
 	const instance = {
 		clock: () => (db.get(["clock"]) as number) ?? 0,
@@ -72,6 +86,4 @@ export function syncDb<R extends ReducerMap>(db: TupleDb, reducers?: R | undefin
 	} as SyncDb<R>
 
 	return instance
-
-	// return { ...writeMethods, ...instance } as SyncDb<R>
 }

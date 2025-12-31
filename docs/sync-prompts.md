@@ -364,3 +364,17 @@ export type SyncDb<R extends ReducerMap> = {
 }
 
 This clean up the abstraction to a more minimal form.
+
+---
+
+Lets change the api for syncDb.write a little bit.
+
+Lets provide an ergonomic option with a callback for building these ops.
+
+use.write({id: "1234", authorId: "1234"}, ops => {
+	ops.set(["a], 1)
+	ops.set(["b], 2)
+	ops.delete(["c])
+})
+
+---

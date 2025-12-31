@@ -38,7 +38,7 @@ export function syncServer(db: TupleDb, reducers: ReducerMap): SyncServer {
 				if (reducer) {
 					const context = Object.create(dataTx)
 					context.syncMetadata = serverCommit
-					reducer(context, op.args)
+					reducer(context, ...op.args)
 				} else {
 					console.warn(`Unknown operation: ${op.fn}`)
 				}
