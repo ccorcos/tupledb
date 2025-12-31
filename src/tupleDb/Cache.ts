@@ -57,6 +57,24 @@ export class Cache<K, V> implements OkvCache<K, V> {
 	// Helpers for dealing with ordered arrays.
 	// ==========================================================================
 
+	// Apply writes to the cache.
+	apply = (args: WriteArgs<K, V>) => {
+		// Apply writes to the cache.
+		this.data.write(args)
+
+		// Track ranges in the cache
+		const setKeys = args.set?.map(({ key }) => key) ?? []
+		const deleteKeys = args.delete ?? []
+		const allKeys = uniqWith([...setKeys, ...deleteKeys], (a, b) => this.compare(a, b) === 0)
+		const ranges = allKeys.map(keyToRange)
+		for (const range of ranges) this.ranges.insert(range)
+
+		// Emit
+		this.emit(ranges)
+	}
+
+	// Apply ranges to the cache.
+	// TODO: insert multiple ranges at once with one single emit.
 	insert = (args: ListArgs<K>, result: { key: K; value: V }[]) => {
 		const range = cachedRange(args, result)
 		this.ranges.insert(range)
@@ -70,24 +88,6 @@ export class Cache<K, V> implements OkvCache<K, V> {
 
 		// Optimistic writes are still in this.pending sitting on top of this.data.
 		this.emitter.emit([range])
-	}
-
-	// Apply updates to the base data (Server State)
-	apply = (changes: WriteArgs<K, V>) => {
-		// TODO: Filter changes to only apply those within valid ranges?
-		// For now we apply all, assuming memory is cheap or user handles unsubscription.
-		// Implementing filtering requires iterating all ranges which might be slow.
-		
-		this.data.write(changes)
-
-		// Emit events for changed keys
-		const keys = [...(changes.set?.map(s => s.key) || []), ...(changes.delete || [])]
-		if (keys.length > 0) {
-			const ranges = keys.map(keyToRange)
-			// We now have these keys in cache.
-			for (const range of ranges) this.ranges.insert(range)
-			this.emit(ranges)
-		}
 	}
 
 	listRaw = (args: ListArgs<K>): { key: K; value: V }[] => this.pending.list(args)

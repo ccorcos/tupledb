@@ -439,3 +439,12 @@ user.write({...}, ops => ops.sendMessage(msg))
 
 Please implement this, being thoughtful about constructing the types, and making sure there's tests.
 
+---
+
+SyncClient seems a bit long and messy.
+
+Lets create types for SyncCache and ClientSyncDb into synDb/types.ts so we have well understood abstracitons to work with.
+
+It seems like TupleCache is worthy of its own abstraction. Then we can call subspace() on that tuple cache which should simplify a lot of things in the ClientSyncDb.
+
+I don't like how the ClientSyncDb has a full referecent to the SyncCache though. Ideally, we should pass a well defined interface there.

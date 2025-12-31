@@ -35,6 +35,7 @@ export type CacheListResult<K, V> = {
  * copying all that data.
  */
 export type OkvCache<K, V> = {
+	apply: (changes: WriteArgs<K, V>) => void
 	insert: (args: ListArgs<K>, result: { key: K; value: V }[]) => void
 	compare: (a: K, b: K) => number
 	list: (args: ListArgs<K>) => CacheListResult<K, V>
@@ -100,4 +101,8 @@ export type Index = {
 export type IndexableOKV = {
 	createIndex(index: Index): void
 	deleteIndex(id: string): void
+}
+
+export type ITupleCache = OkvCache<Tuple, JSONValue> & {
+	subspace: (prefix: Tuple) => ITupleCache
 }
