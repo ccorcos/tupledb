@@ -84,6 +84,8 @@ export class Cache<K, V> implements OkvCache<K, V> {
 		const keys = [...(changes.set?.map(s => s.key) || []), ...(changes.delete || [])]
 		if (keys.length > 0) {
 			const ranges = keys.map(keyToRange)
+			// We now have these keys in cache.
+			for (const range of ranges) this.ranges.insert(range)
 			this.emit(ranges)
 		}
 	}

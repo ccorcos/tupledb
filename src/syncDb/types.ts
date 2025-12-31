@@ -1,4 +1,6 @@
-import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb } from "../tupleDb/types"
+import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb, WriteArgs } from "../tupleDb/types"
+
+export type JSONValue = any
 
 // ==========================================================================
 // Sync Core Types
@@ -38,6 +40,18 @@ export type Commit<R extends ReducerMap = ReducerMap> = {
 	ops: Op<R>[]
 }
 
+export type PendingCommit<R extends ReducerMap> = {
+	commit: Commit<R>
+	cleanup: () => void
+	changes: WriteArgs<Tuple, JSONValue>
+}
+
+export type SubscribeResult = {
+	local: { hit?: any[]; miss?: boolean; prefix?: any[] }
+	remote: Promise<any[]>
+	unsubscribe: () => void
+}
+
 export type SyncDb<R extends ReducerMap> = {
 	clock: () => number
 	history: ReadOnlyTupleDb
@@ -74,21 +88,15 @@ export type ReadResult = FetchResult & {
 	data: { key: Tuple; value: any }[]
 }
 
-export type SyncTransport = {
-	write: (prefix: any[], commits: Commit[]) => Promise<WriteResult>
-	sync: (prefix: any[], commits: Commit[], syncedClock: number) => Promise<SyncResult>
-	read: (prefix: any[], range: ListArgs<Tuple>, syncedClock: number) => Promise<ReadResult>
+export type Pubsub = {
+	publish(tuple: Tuple, value: JSONValue): void
+	subscribe(tuple: Tuple): void
+	onMessage(listener: (tuple: Tuple, value: JSONValue) => void): () => void
 }
 
-export type SyncManagerConfig = {
-	db: TupleDb
-	reducers: ReducerMap
-	transport: SyncTransport
-}
-
-export type SyncServer = {
-	write(scope: Tuple, commits: Commit[]): WriteResult
-	fetch(scope: Tuple, sinceClock: number): FetchResult
-	sync(scope: Tuple, commits: Commit[], syncedClock: number): SyncResult
-	read(scope: Tuple, range: ListArgs<Tuple>, syncedClock: number): ReadResult
+export type SyncApi = {
+	write(scope: Tuple, commits: Commit[]): Promise<WriteResult>
+	fetch(scope: Tuple, sinceClock: number): Promise<FetchResult>
+	sync(scope: Tuple, commits: Commit[], syncedClock: number): Promise<SyncResult>
+	read(scope: Tuple, range: ListArgs<Tuple>, syncedClock: number): Promise<ReadResult>
 }

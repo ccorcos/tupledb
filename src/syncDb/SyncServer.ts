@@ -1,11 +1,11 @@
 import { tupleTx } from "../tupleDb/TupleDb"
 import { TupleDb, Tuple, ListArgs } from "../tupleDb/types"
 import { syncDb, defaultReducers } from "./SyncDb"
-import { SyncResult, ReadResult, WriteResult, FetchResult, SyncServer, ReducerMap, Commit } from "./types"
+import { SyncResult, ReadResult, WriteResult, FetchResult, ReducerMap, Commit, SyncApi } from "./types"
 
-export function syncServer(db: TupleDb, reducers: ReducerMap): SyncServer {
+export function syncServer(db: TupleDb, reducers: ReducerMap): SyncApi {
 	// Just submit writes, return confirmation (clock)
-	function write(scope: Tuple, commits: Commit[]): WriteResult {
+	async function write(scope: Tuple, commits: Commit[]): Promise<WriteResult> {
 		const tx = tupleTx(db)
 		const scopeTx = tx.subspace(scope)
 		const dataTx = scopeTx.subspace(["data"])
@@ -55,7 +55,7 @@ export function syncServer(db: TupleDb, reducers: ReducerMap): SyncServer {
 	}
 
 	// Fetch history updates since clock
-	function fetch(scope: Tuple, sinceClock: number): FetchResult {
+	async function fetch(scope: Tuple, sinceClock: number): Promise<FetchResult> {
 		const scopeDb = syncDb(db.subspace(scope), reducers)
 		const updates = scopeDb.history
 			.list({ gt: [sinceClock] })
@@ -67,14 +67,14 @@ export function syncServer(db: TupleDb, reducers: ReducerMap): SyncServer {
 	}
 
 	// Composite: Write then Fetch
-	function sync(scope: Tuple, commits: Commit[], syncedClock: number): SyncResult {
-		write(scope, commits)
+	async function sync(scope: Tuple, commits: Commit[], syncedClock: number): Promise<SyncResult> {
+		await write(scope, commits)
 		return fetch(scope, syncedClock)
 	}
 
 	// Composite: Fetch updates and Read data snapshot
-	function read(scope: Tuple, range: ListArgs<Tuple>, syncedClock: number): ReadResult {
-		const fetchRes = fetch(scope, syncedClock)
+	async function read(scope: Tuple, range: ListArgs<Tuple>, syncedClock: number): Promise<ReadResult> {
+		const fetchRes = await fetch(scope, syncedClock)
 		const scopeDb = syncDb(db.subspace(scope), reducers)
 		const data = scopeDb.data.list(range)
 

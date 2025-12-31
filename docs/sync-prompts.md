@@ -378,3 +378,64 @@ use.write({id: "1234", authorId: "1234"}, ops => {
 })
 
 ---
+
+
+Lets massage these abstractions a bit.
+
+
+First, for the sake of reactivity, there are two components to the server api. There's the read/write kinds of http methods, as well as a pub/sub kind of websocket api so we can actively push and listen for changes.
+
+Pubsub is a generic utility, but in practice, the server is only going to publish clock values and the clients will subscribe to those clocks.
+
+```ts
+type Pubsub = {
+	publish(tuple: Tuple, value: JSONValue): void
+	subscribe(tuple: Tuple): void
+	onMessage(listener: (tuple: Tuple, value: JSONValue) => void): () => void
+}
+```
+
+We'll rename SyncManager to SyncCache and its going to look something like this.
+
+```ts
+type TupleCache = Cache<Tuple, JSONValue>
+
+class SyncCache {
+
+	cache: TupleCache
+
+	constructor(args: {
+		api: SyncServer
+		pubsub: Pubsub
+	})
+
+	// ...
+}
+```
+
+In terms of actually using it on the frontend, it should look something like this:
+
+```ts
+const cache = new SyncCache({api, pubsub})
+
+// Specify a path
+const user = cache.syncDb(["user", "user1"], userReducers)
+
+// Range query
+const {local, remote, unsubscribe} = user.data.subscribe({gt, lt}, ({hit, miss, prefix}) => {
+	// Update...
+	// Note: this can be called from remote data syncing or from optimistic local updates.
+})
+
+const {hit, miss, prefix} = local // immediate local results in the cache
+const items = await remote // if you want to await the request to the server
+unsubscribe() // decrement references to retaining this range in the cache and possibly unsubscribe from remote clock.
+
+user.history.subscribe() // works the same as user.data.subscribe
+user.pending.list() // tells about local pending writes that go on top of history.
+
+user.write({...}, ops => ops.sendMessage(msg))
+```
+
+Please implement this, being thoughtful about constructing the types, and making sure there's tests.
+

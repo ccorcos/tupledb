@@ -11,80 +11,15 @@ Create branches to experiment with new layers and implementations...
 
 ---
 
-SyncManager.transport should be typed.
 
-
-```ts
-
-
-type TupleCache = Cache<Tuple, JSONValue>
-
-// Formerly called the SyncManager
-class SyncCache {
-
-	cache: TupleCache
-
-	constructor(args: {
-		api: SyncServer
-		pubsub: Pubsub
-	})
-
-	// ...
-}
-
-// Server only publishes syncDb clocks and we only ever subscribe to clocks as well.
-type Pubsub = {
-	subscribe(tuple: Tuple): void
-	onMessage(listener: (tuple: Tuple, value: JSONValue) => void): () => void
-}
-
-const cache = new SyncCache({api, pubsub})
-
-// Specify a path
-const user = cache.syncDb(["user", "user1"], userReducers)
-
-// Range query
-const {local, remote, unsubscribe} = user.data.subscribe({gt, lt}, ({hit, miss, prefix}) => {
-	// Update...
-	// Note: this can be called from remote data syncing or from optimistic local updates.
-})
-
-const {hit, miss, prefix} = local // immediate local results in the cache
-const items = await remote // if you want to await the request to the server
-unsubscribe() // decrement references to retaining this range in the cache and possibly unsubscribe from remote clock.
-
-user.history.subscribe() // works the same as user.data.subscribe
-user.pending.list() // tells about local pending writes that go on top of history.
-
-user.write({...}, ops => ops.sendMessage(msg))
-```
-
-
-
-
-
-
-
-
-
-
-
-I need to come up with an API over http and websockets.
-The http api is just async functions, and the websocket api is pubsub for tuple keys and clock values.
-
+Lets extend the {pubsub, api} for replication as well.
 
 ```ts
 const user = syncDb(db.subspace(["user", "user1"]))
 const replica = syncDb(db2)
-
-
-
-replicate(user, replica)
-
-// Lets put a network in between with pubsub for realtime as well.
+const userServer = syncServer(user) // api and pubsub
+replicate(userServer, replica)
 ```
-
-Are operations all globally consolidated? or are they composed? Like redux. Maybe I want to have entirely isolated environments.
 
 
 
