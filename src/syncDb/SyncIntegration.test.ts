@@ -1,11 +1,11 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
 import { tupleDb } from "../tupleDb/TupleDb"
-import { SyncManager } from "./SyncClient"
-import { syncServer } from "./SyncServer"
-import { SyncResult, ReadResult, WriteResult, SyncServer, Commit } from "./types"
-import { syncDb } from "./SyncDb"
 import { ListArgs, Tuple } from "../tupleDb/types"
+import { SyncManager } from "./SyncClient"
+import { syncDb } from "./SyncDb"
+import { syncServer } from "./SyncServer"
+import { Commit, ReadResult, SyncResult, SyncServer, WriteResult } from "./types"
 
 // Mock transport
 const createTransport = (server: SyncServer) => {
@@ -26,7 +26,7 @@ const createTransport = (server: SyncServer) => {
 			if (!online) throw new Error("Offline")
 			await new Promise((resolve) => setTimeout(resolve, 10))
 			return server.read(prefix, range, clock)
-		}
+		},
 	}
 }
 
@@ -82,16 +82,22 @@ describe("SyncDb Integration", () => {
 	it("lazy fetch and partial sync", async () => {
 		const serverDb = tupleDb()
 		const reducers = {
-			setDoc: (db: any, [k, v]: [any, any]) => db.set(k, v)
+			setDoc: (db: any, [k, v]: [any, any]) => db.set(k, v),
 		}
 		const server = syncServer(serverDb, reducers)
 		const transport = createTransport(server)
 
 		// Pre-populate server with data
 		const serverUserDb = syncDb(serverDb.subspace(["user", 1]), reducers)
-		serverUserDb.setDoc([["doc", "1"], "v1"]) // clock 1
-		serverUserDb.setDoc([["doc", "2"], "v2"]) // clock 2
-		serverUserDb.setDoc([["doc", "3"], "v3"]) // clock 3
+		serverUserDb.write({
+			ops: [{ fn: "setDoc", args: [["doc", "1"], "v1"] }],
+		})
+		serverUserDb.write({
+			ops: [{ fn: "setDoc", args: [["doc", "2"], "v2"] }],
+		})
+		serverUserDb.write({
+			ops: [{ fn: "setDoc", args: [["doc", "3"], "v3"] }],
+		})
 
 		const clientDb = tupleDb()
 		const manager = new SyncManager({
@@ -106,13 +112,13 @@ describe("SyncDb Integration", () => {
 
 		// 2. Client requests range
 		const results = await session.list({ gte: ["doc", "1"], lte: ["doc", "2"] })
-		
+
 		assert.equal(results.length, 2)
 		assert.deepEqual(results[0].value, "v1")
 		assert.deepEqual(results[1].value, "v2")
-		
+
 		assert.ok(session.syncedClock >= 3)
-		
+
 		const doc3Key = ["user", 1, "data", "doc", "3"]
 		assert.equal(clientDb.get(doc3Key), "v3")
 
@@ -126,17 +132,17 @@ describe("SyncDb Integration", () => {
 			post: (db: any, { id, content }: any) => {
 				const time = db.syncMetadata?.createdAt ?? new Date().toISOString()
 				db.set(["posts", id], { content, time })
-			}
+			},
 		}
-		
+
 		const server = syncServer(serverDb, reducers)
 		const transport = createTransport(server)
-		
+
 		const originalSync = transport.sync
 		transport.sync = (prefix, commits, clock) => {
-			const newCommits = commits.map(c => ({
+			const newCommits = commits.map((c) => ({
 				...c,
-				createdAt: "9999-01-01T00:00:00.000Z"
+				createdAt: "9999-01-01T00:00:00.000Z",
 			}))
 			return originalSync(prefix, newCommits, clock)
 		}
@@ -159,28 +165,40 @@ describe("SyncDb Integration", () => {
 	it("write-only submission (offline recovery)", async () => {
 		const serverDb = tupleDb()
 		const reducers = {
-			log: (db: any, msg: string) => db.set(["logs", Date.now()], msg)
+			log: (db: any, msg: string) => db.set(["logs", Date.now()], msg),
 		}
 		const server = syncServer(serverDb, reducers)
 		const transport = createTransport(server)
 
 		// Direct write via transport
-        const now = new Date().toISOString()
+		const now = new Date().toISOString()
 		const commits: Commit[] = [
-			{ id: "tx1", clock: 0, commitedAt: "", createdAt: now, ops: [{ fn: "log", args: "recovered 1" }] },
-			{ id: "tx2", clock: 0, commitedAt: "", createdAt: now, ops: [{ fn: "log", args: "recovered 2" }] }
+			{
+				id: "tx1",
+				clock: 0,
+				commitedAt: "",
+				createdAt: now,
+				ops: [{ fn: "log", args: "recovered 1" }],
+			},
+			{
+				id: "tx2",
+				clock: 0,
+				commitedAt: "",
+				createdAt: now,
+				ops: [{ fn: "log", args: "recovered 2" }],
+			},
 		]
-		
+
 		const res = await transport.write(["sys"], commits)
-		
+
 		assert.ok(res.clock >= 2)
-		
+
 		// Verify server applied them
 		const sysDb = syncDb(serverDb.subspace(["sys"]), reducers)
 		const history = sysDb.history.list()
 		assert.equal(history.length, 2)
-        const c1 = history[0].value as Commit
-        const c2 = history[1].value as Commit
+		const c1 = history[0].value as Commit
+		const c2 = history[1].value as Commit
 		assert.deepEqual(c1.ops[0].args, "recovered 1")
 		assert.deepEqual(c2.ops[0].args, "recovered 2")
 	})

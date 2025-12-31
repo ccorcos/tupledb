@@ -12,7 +12,10 @@ describe("SyncDb", () => {
 		assert.equal(user.clock(), 0)
 
 		// 'set' is a default reducer
-		user.set({ key: ["name"], value: "chet" })
+		user.write({
+			authorId: "user1",
+			ops: [{ fn: "set", args: { key: ["name"], value: "chet" } }],
+		})
 
 		// Check clock incremented
 		assert.equal(user.clock(), 1)
@@ -32,14 +35,14 @@ describe("SyncDb", () => {
 		const db = tupleDb()
 		const user = syncDb(db)
 
-		const batch = {
-			set: [
-				{ key: ["a"], value: 1 },
-				{ key: ["b"], value: 2 },
+		user.write({
+			authorId: "user1",
+			ops: [
+				{ fn: "set", args: { key: ["a"], value: 1 } },
+				{ fn: "set", args: { key: ["b"], value: 2 } },
+				{ fn: "delete", args: ["c"] },
 			],
-			delete: [["c"]],
-		}
-		user.batch(batch)
+		})
 
 		assert.equal(user.clock(), 1)
 		assert.equal(user.data.get(["a"]), 1)
@@ -47,8 +50,6 @@ describe("SyncDb", () => {
 
 		const history = user.history.list()
 		assert.equal(history.length, 1)
-		const commit = history[0].value as Commit
-		assert.deepEqual(commit.ops[0], { fn: "batch", args: batch })
 	})
 
 	it("custom reducers", () => {
@@ -61,7 +62,10 @@ describe("SyncDb", () => {
 		}
 		const user = syncDb(db, reducers)
 
-		user.inc(["count"])
+		user.write({
+			authorId: "user1",
+			ops: [{ fn: "inc", args: ["count"] }],
+		})
 
 		assert.equal(user.data.get(["count"]), 1)
 
@@ -79,7 +83,10 @@ describe("SyncDb", () => {
 		const inboxDb = db.subspace(["inbox"])
 		const inbox = syncDb(inboxDb)
 
-		inbox.set({ key: ["msg1"], value: "hello" })
+		inbox.write({
+			authorId: "user1",
+			ops: [{ fn: "set", args: { key: ["msg1"], value: "hello" } }],
+		})
 
 		// Check clocks are independent
 		assert.equal(user.clock(), 0)

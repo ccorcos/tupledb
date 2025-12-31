@@ -4,34 +4,39 @@ import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb } from "../tupleDb/types"
 // Sync Core Types
 // ==========================================================================
 
-export type CommitMetadata = {
+export type Reducer = (tx: TupleDb, args: any) => void
+export type ReducerMap = Record<string, Reducer>
+export type Op<R extends ReducerMap = any> = {
+	fn: keyof R
+	args: Parameters<R[keyof R]>[1]
+}
+
+export type CommitArgs<R extends ReducerMap = ReducerMap> = {
+	id?: string
+	authorId?: string
+	createdAt?: string
+	ops: Op<R>[]
+}
+
+export type Commit<R extends ReducerMap = ReducerMap> = {
 	id: string
 	authorId?: string // Used for authorization.
 	createdAt: string // ISO string when the client created it
-}
-
-export type Reducer = (tx: TupleDb, args: any) => void
-export type ReducerMap = Record<string, Reducer>
-export type Op = { fn: string; args: any }
-
-export type CommitData = {
 	clock: number
 	commitedAt: string // ISO string when the server wrote it to the database
-	ops: Op[]
-}
-
-export type Commit = CommitMetadata & CommitData
-
-export type WriteSyncDb<R extends ReducerMap> = {
-	[K in keyof R]: (args: Parameters<R[K]>[1]) => void
+	ops: Op<R>[]
 }
 
 export type SyncDb<R extends ReducerMap> = {
 	clock: () => number
 	history: ReadOnlyTupleDb
 	data: ReadOnlyTupleDb
-	write: (commit: (Partial<CommitMetadata> & { ops: Op[] }) | Commit) => Commit
-} & WriteSyncDb<R>
+	write: (commit: CommitArgs<R> | Commit<R>) => Commit<R>
+}
+
+export type WriteSyncDb<R extends ReducerMap> = {
+	[K in keyof R]: (args: Parameters<R[K]>[1]) => void
+}
 
 // ==========================================================================
 // Sync Transport / Server Types

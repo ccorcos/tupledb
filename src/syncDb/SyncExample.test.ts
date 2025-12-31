@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { TupleDb } from "../tupleDb/types"
 import { tupleDb } from "../tupleDb/TupleDb"
+import { TupleDb } from "../tupleDb/types"
 import { syncDb } from "./SyncDb"
 import { Commit } from "./types"
 
@@ -26,28 +26,34 @@ describe("SyncDb Example", () => {
 		})
 
 		// Helper to create server-side DBs for users
-		const createUserDb = (db: TupleDb, userId: string) => 
+		const createUserDb = (db: TupleDb, userId: string) =>
 			syncDb(db.subspace(["user", userId]), userReducers(userId))
 
 		const db = tupleDb()
 
 		// 1. Writes with Metadata
 		// ======================================================================
-		
-		// To perform a write, we use the SyncDb instance. 
+
+		// To perform a write, we use the SyncDb instance.
 		// We can use the generated methods (setUser) which create a commit internally.
 		const user1Db = createUserDb(db, "user1")
-		user1Db.setUser({ id: "user1", name: "John" })
+		user1Db.write({
+			authorId: "user1",
+			ops: [{ fn: "setUser", args: { id: "user1", name: "John" } }],
+		})
 
 		// Or we can explicitly call write for more control (e.g. metadata)
 		const user2Db = createUserDb(db, "user2")
 		user2Db.write({
 			authorId: "user2",
-			ops: [{ fn: "setUser", args: { id: "user2", name: "Jane" } }]
+			ops: [{ fn: "setUser", args: { id: "user2", name: "Jane" } }],
 		})
 
 		const user3Db = createUserDb(db, "user3")
-		user3Db.setUser({ id: "user3", name: "Jim" })
+		user3Db.write({
+			authorId: "user3",
+			ops: [{ fn: "setUser", args: { id: "user3", name: "Jim" } }],
+		})
 
 		// Verify data
 		assert.deepEqual(user1Db.data.get([]), { id: "user1", name: "John" })
@@ -64,11 +70,14 @@ describe("SyncDb Example", () => {
 		// User2 sends a message
 		// This involves writing to User2's DB and recipients' DBs.
 		// In a real system, this might be distributed. Here we simulate the logic.
-		
+
 		const sendMsgTx = (msg: Message) => {
 			// 1. Sender's Outbox
 			const senderDb = createUserDb(db, msg.fromId)
-			senderDb.setMessage(msg)
+			senderDb.write({
+				authorId: msg.fromId,
+				ops: [{ fn: "setMessage", args: msg }],
+			})
 
 			// 2. Recipients' Inboxes
 			for (const userId of msg.toId) {
@@ -76,7 +85,7 @@ describe("SyncDb Example", () => {
 				// We can include causal info or original author in metadata
 				recipientDb.write({
 					authorId: msg.fromId,
-					ops: [{ fn: "setMessage", args: msg }]
+					ops: [{ fn: "setMessage", args: msg }],
 				})
 			}
 		}
@@ -86,12 +95,11 @@ describe("SyncDb Example", () => {
 		// Verify Inbox of User1
 		assert.equal((user1Db.data.get(["message", "msg1"]) as Message).body, "Hello friends!")
 
-
 		// 2. Replication (Full Replica)
 		// ======================================================================
-		
+
 		const replicaDb = tupleDb()
-		
+
 		function replicateUser(userId: string) {
 			const primary = createUserDb(db, userId)
 			const replica = createUserDb(replicaDb, userId)
@@ -117,10 +125,9 @@ describe("SyncDb Example", () => {
 		assert.deepEqual(replicaUser1.data.get([]), { id: "user1", name: "John" })
 		assert.equal(replicaUser1.clock(), user1Db.clock())
 
-
 		// 3. Client Sync (Partial/Offline)
 		// ======================================================================
-		
+
 		// Client has their own local DB
 		const clientDb = tupleDb()
 		const clientUser1 = createUserDb(clientDb, "user1")
@@ -135,8 +142,11 @@ describe("SyncDb Example", () => {
 		assert.deepEqual(clientUser1.data.get([]), { id: "user1", name: "John" })
 
 		// B. Client makes Offline Write
-		clientUser1.setUser({ id: "user1", name: "John Doe" }) // Update name
-		
+		clientUser1.write({
+			authorId: "user1",
+			ops: [{ fn: "setUser", args: { id: "user1", name: "John Doe" } }],
+		})
+
 		// Client clock increments locally
 		const clientLocalClock = clientUser1.clock()
 		assert.equal(clientLocalClock, user1Db.clock() + 1)
@@ -144,16 +154,16 @@ describe("SyncDb Example", () => {
 		// C. Push to Server
 		// Client sends the *ops*, not the full commit (because server dictates clock)
 		const clientUnsynced = clientUser1.history.list({ gt: [user1Db.clock()] })
-		
+
 		for (const { value } of clientUnsynced) {
 			const localCommit = value as Commit
-			
+
 			// Server applies the ops
 			// In a real app, server would handle conflict resolution or rebase here.
 			// Here we just accept the write.
 			user1Db.write({
 				id: localCommit.id, // Preserve ID for idempotency/tracking
-				ops: localCommit.ops
+				ops: localCommit.ops,
 			})
 		}
 
@@ -161,7 +171,7 @@ describe("SyncDb Example", () => {
 		assert.equal(user1Db.clock(), clientLocalClock)
 		assert.deepEqual(user1Db.data.get([]), { id: "user1", name: "John Doe" })
 
-		// In a real client, we would now pull the new server commit 
+		// In a real client, we would now pull the new server commit
 		// and confirm it matches our local optimistic commit.
 	})
 })

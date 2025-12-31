@@ -331,3 +331,36 @@ Syncing to a partial replica required using the sync client and the underlying c
 
 ---
 
+More changes to syncdb types.
+
+Flatten out the types more like this
+
+export type CommitArgs = {
+	id?: string
+	authorId?: string
+	createdAt?: string
+	ops: Op[]
+}
+
+export type Commit = {
+	id: string
+	authorId?: string // Used for authorization.
+	createdAt: string // ISO string when the client created it
+	clock: number
+	commitedAt: string // ISO string when the server wrote it to the database
+	ops: Op[]
+}
+
+Op should and commit should probably be generic to the reducer map so the types work. Give it any type default though so its easy to use.
+
+
+Then we can simplify syncDb a lot like this.
+
+export type SyncDb<R extends ReducerMap> = {
+	clock: () => number
+	history: ReadOnlyTupleDb
+	data: ReadOnlyTupleDb
+	write: (commit: CommitArgs<R> | Commit<R>) => Commit
+}
+
+This clean up the abstraction to a more minimal form.
