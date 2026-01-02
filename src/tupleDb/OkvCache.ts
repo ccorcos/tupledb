@@ -91,8 +91,6 @@ export class OkvCache<K, V> implements OkvCacheApi<K, V> {
 		this.emitter.emit(ranges)
 	}
 
-	listRaw = (args: ListArgs<K>): { key: K; value: V }[] => this.pending.list(args)
-
 	list = (args: ListArgs<K>): CacheListResult<K, V> => {
 		const range = encodeRange(args)
 

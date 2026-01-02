@@ -20,8 +20,6 @@ Gemini.md...
 OkvCacheApi
 TupleCacheApi
 
-Lets get rid of OkvCache listRaw as well.
-
 
 TupleDbCache is the unifying abstraction that combines {api, pubsub, tupleCache}
 

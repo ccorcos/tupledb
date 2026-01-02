@@ -45,12 +45,6 @@ export class TupleCache implements TupleCacheApi {
 		return KeyDecodeCacheListResult(result, this.encoder)
 	}
 
-	listRaw = (args: ListArgs<Tuple>) => {
-		const fullArgs = EncodeSubspaceListArgs(args, this.prefix)
-		const result = this.cache.listRaw(fullArgs)
-		return result.map(({ key, value }) => ({ key: this.encoder.decode(key), value }))
-	}
-
 	write = (args: WriteArgs<Tuple, JSONValue>) => {
 		const fullArgs = KeyEncodeWrite(args, this.encoder)
 		return this.cache.write(fullArgs)

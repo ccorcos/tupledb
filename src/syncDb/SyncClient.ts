@@ -58,7 +58,8 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		this.cache = (syncCache.cache as TupleCache).subspace(prefix)
 		this.dataCache = this.cache.subspace(["data"])
 
-		const clock = this.cache.listRaw({ gte: ["clock"], lte: ["clock"] })[0]?.value
+		const clockRes = this.cache.list({ gte: ["clock"], lte: ["clock"] })
+		const clock = clockRes.hit?.[0]?.value
 		this.syncedClock = (clock as number) || 0
 	}
 
@@ -72,9 +73,9 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		const self = this
 		const db = readOnlyTupleDb({
 			compare: this.dataCache.compare,
-			list: (args) => this.dataCache.listRaw(args),
-			get: (key) => this.dataCache.listRaw({ gte: key, lte: key })[0]?.value,
-			has: (key) => this.dataCache.listRaw({ gte: key, lte: key }).length > 0,
+			list: (args) => this.dataCache.list(args).hit || [],
+			get: (key) => this.dataCache.list({ gte: key, lte: key }).hit?.[0]?.value,
+			has: (key) => (this.dataCache.list({ gte: key, lte: key }).hit?.length || 0) > 0,
 			write: () => {
 				throw new Error("Write via user.write()")
 			}, // Read-only
@@ -171,7 +172,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		// For now just enough for tests/usage
 		return {
 			list: (args: ListArgs<Tuple> = {}) => {
-				return historyCache.listRaw(args)
+				return historyCache.list(args).hit || []
 			},
 			subscribe: () => {
 				// TODO: Implement subscription for history
@@ -272,15 +273,15 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 				// Optimistic get from cache?
 				const fullKey = [...fullPrefix, ...key]
 				// We need to read from the session cache
-				const res = this.cache.listRaw({ gte: fullKey, lte: fullKey })
-				return res[0]?.value
+				const res = this.cache.list({ gte: fullKey, lte: fullKey })
+				return res.hit?.[0]?.value
 			},
 			list: () => [], // Not supported in reducer usually
 			subspace: (p) => this.createProxyTx(writes, [...scope, ...p]),
 			// Other methods...
 			has: (key) => {
 				const fullKey = [...fullPrefix, ...key]
-				return this.cache.listRaw({ gte: fullKey, lte: fullKey }).length > 0
+				return (this.cache.list({ gte: fullKey, lte: fullKey }).hit?.length || 0) > 0
 			},
 			commit: () => {},
 			committed: false,
