@@ -461,3 +461,54 @@ I like the idea of keeping the okv cache to a minimal api.
 
 Lets propagate all those changes to TupleCache and everywhere else its used.
 
+export type OkvCache<K, V> = {
+	insert: (ranges: {args: ListArgs<K>, result: { key: K; value: V }[]}[]) => void
+	compare: (a: K, b: K) => number
+	list: (args: ListArgs<K>) => CacheListResult<K, V>
+	write: (args: WriteArgs<K, V>) => () => void
+	subscribe: (range: Range<K>, fn: () => void) => () => void
+}
+
+
+❯❯❯ tree src
+src
+├── recordDb
+│   ├── RecordLayer.fuzz.test.ts
+│   ├── RecordLayer.test.ts
+│   └── RecordLayer.ts
+├── shared
+│   ├── compactObj.ts
+│   ├── compare.ts
+│   ├── OrderedList.ts
+│   ├── randomId.ts
+│   └── reverse.ts
+├── syncDb
+│   ├── react.ts
+│   ├── SyncClient.ts
+│   ├── SyncDb.test.ts
+│   ├── SyncDb.ts
+│   ├── SyncExample.test.ts
+│   ├── SyncIntegration.test.ts
+│   ├── SyncServer.ts
+│   └── types.ts
+└── tupleDb
+    ├── Codec.ts
+    ├── Encoder.ts
+    ├── InMemoryOkv.ts
+    ├── OkvCache.test.ts
+    ├── OkvCache.ts
+    ├── Range.test.ts
+    ├── Range.ts
+    ├── RangeEmitter.ts
+    ├── RangeTree.test.ts
+    ├── RangeTree.ts
+    ├── ReadCache.ts
+    ├── SQLiteOkv.ts
+    ├── Transaction.test.ts
+    ├── Transaction.ts
+    ├── TupleCache.ts
+    ├── TupleDb.test.ts
+    ├── TupleDb.ts
+    └── types.ts
+
+---

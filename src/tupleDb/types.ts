@@ -30,8 +30,7 @@ export type CacheListResult<K, V> = {
 }
 
 export type OkvCache<K, V> = {
-	apply: (changes: WriteArgs<K, V>) => void
-	insert: (args: ListArgs<K>, result: { key: K; value: V }[]) => void
+	insert: (items: { args: ListArgs<K>; result: { key: K; value: V }[] }[]) => void
 	compare: (a: K, b: K) => number
 	list: (args: ListArgs<K>) => CacheListResult<K, V>
 	listRaw: (args: ListArgs<K>) => { key: K; value: V }[]

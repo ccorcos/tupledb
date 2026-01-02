@@ -57,37 +57,38 @@ export class OkvCache<K, V> implements OkvCacheApi<K, V> {
 	// Helpers for dealing with ordered arrays.
 	// ==========================================================================
 
-	// Apply writes to the cache.
-	apply = (args: WriteArgs<K, V>) => {
-		// Apply writes to the cache.
-		this.data.write(args)
-
-		// Track ranges in the cache
-		const setKeys = args.set?.map(({ key }) => key) ?? []
-		const deleteKeys = args.delete ?? []
-		const allKeys = uniqWith([...setKeys, ...deleteKeys], (a, b) => this.compare(a, b) === 0)
-		const ranges = allKeys.map(keyToRange)
+	// Apply ranges to the cache.
+	insert = (items: { args: ListArgs<K>; result: { key: K; value: V }[] }[]) => {
+		const ranges = items.map(({ args, result }) => cachedRange(args, result))
 		for (const range of ranges) this.ranges.insert(range)
 
-		// Emit
-		this.emit(ranges)
-	}
-
-	// Apply ranges to the cache.
-	// TODO: insert multiple ranges at once with one single emit.
-	insert = (args: ListArgs<K>, result: { key: K; value: V }[]) => {
-		const range = cachedRange(args, result)
-		this.ranges.insert(range)
-
 		const tx = new Transaction(this.data)
-		// Delete the existing range.
-		tx.write({ delete: tx.list(range).map(({ key }) => key) })
-		// Overwrite with new data.
-		tx.write({ set: result })
+
+		for (let i = 0; i < items.length; i++) {
+			const { result } = items[i]
+			const range = ranges[i]
+
+			// Optimization: if the range is a single key (gte == lte), skip reading.
+			if (
+				range.gte !== undefined &&
+				range.lte !== undefined &&
+				this.compare(range.gte, range.lte) === 0
+			) {
+				if (result.length === 0) {
+					tx.write({ delete: [range.gte] })
+				} else {
+					tx.write({ set: result })
+				}
+			} else {
+				tx.write({ delete: tx.list(range).map(({ key }) => key) })
+				tx.write({ set: result })
+			}
+		}
+
 		tx.commit()
 
 		// Optimistic writes are still in this.pending sitting on top of this.data.
-		this.emitter.emit([range])
+		this.emitter.emit(ranges)
 	}
 
 	listRaw = (args: ListArgs<K>): { key: K; value: V }[] => this.pending.list(args)
@@ -274,4 +275,27 @@ export function cachedRange<K, V>(args: ListArgs<K>, result: { key: K; value: V 
 
 	// Last item is the end of the range.
 	return compactObj({ gt, gte, lte: result[result.length - 1].key })
+}
+
+export function writeToInsert<K, V>(
+	args: WriteArgs<K, V>
+): { args: ListArgs<K>; result: { key: K; value: V }[] }[] {
+	const items: { args: ListArgs<K>; result: { key: K; value: V }[] }[] = []
+	if (args.set) {
+		for (const { key, value } of args.set) {
+			items.push({
+				args: { gte: key, lte: key },
+				result: [{ key, value }],
+			})
+		}
+	}
+	if (args.delete) {
+		for (const key of args.delete) {
+			items.push({
+				args: { gte: key, lte: key },
+				result: [],
+			})
+		}
+	}
+	return items
 }

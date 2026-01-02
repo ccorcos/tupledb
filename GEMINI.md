@@ -22,7 +22,7 @@ The system is built as a stack of layers implementing the `Okv<K, V>` interface:
 
 ## Key Conventions
 
-### 1. The `Okv` Interface
+### The `Okv` Interface
 Everything revolves around this interface defined in `src/tupleDb/types.ts`:
 
 ```ts
@@ -35,18 +35,18 @@ type Okv<K, V> = {
 * Always respect the `compare` function. Do not assume standard JS comparison.
 * Immutability: `list` should return copies or treated as read-only.
 
-### 2. Functional Composition
+### Functional Composition
 New features should generally be implemented as wrappers around `Okv` rather than modifying core classes.
 * Pattern: `function MyFeatureOkv(db: Okv): Okv { ... }`
 
-### 3. Testing
+### Testing
 - we're using `node:test` and `node:assert` packages fopr testing.
 - to run a single file `npx tsx path/to/file.test.ts`
 - IMPORTANT: to run tests, use `npm test`.
 - test files are co-located as `*.test.ts` files.
 - always check types to verify no type errors `npm run typecheck`.
 
-### 4. Code Style
+### Code Style
 * Formatting: Prettier (`npm run prettier`).
 * Imports: Use explicit relative paths.
 * Types: Strict TypeScript
@@ -54,3 +54,8 @@ New features should generally be implemented as wrappers around `Okv` rather tha
 ## Directory Structure
 * `src/tupleDb/`: Core database logic.
 * `src/shared/`: Low-level utilities (comparison, data structures).
+
+## Practices
+
+- do not use `git` commands unless explicitly directed to.
+- ignore anything in the TODO.md file

@@ -8,18 +8,23 @@ Create branches to experiment with new layers and implementations...
 
 - deferred eventually consistent job updates or whatever queue.
 
+Gemini.md...
+- tupledb
+- syncdb
+- recorddb
+- use a separate types file
+
 
 ---
 
-I like the idea of keeping the okv cache to a minimal api.
+OkvCacheApi
+TupleCacheApi
 
-1. we can consolidate insert and apply. insert is more general than apply because it can handle ranges. however we should probably add a couple optimizations. (a) insert should accept a batch. insert(ranges: {args: ListArgs, items: {key, value}[]}[]), that way we can write multiple matches in a single transaction and a single call to emit which allows us to deduplicate emits. (b) we can check if the list args range is lte equals gte, and skip the read step since it will just overwrite, and we can check result.length === 0 for a delete vs a set. This makes things a little more efficient for writing single items.
+Lets get rid of OkvCache listRaw as well.
 
-2. now we can have a simple help function writeToInsert(changes: WriteArgs): {args: ListArgs, items: {key, value}[]}[] so that we can get rid of the apply function but use this helper to map its args into insert.
 
-3. I think we can also get rid of listRaw. It feels like an antipattern. We should always be considering whether the data is actually in the cache or not when reading.
+TupleDbCache is the unifying abstraction that combines {api, pubsub, tupleCache}
 
-Lets propagate all those changes to TupleCache and everywhere else its used.
 
 
 

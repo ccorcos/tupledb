@@ -1,6 +1,6 @@
 import { randomId } from "../shared/randomId"
 import { codec } from "../tupleDb/Codec"
-import { OkvCache, cachedRange } from "../tupleDb/OkvCache"
+import { OkvCache, cachedRange, writeToInsert } from "../tupleDb/OkvCache"
 import { TupleCache } from "../tupleDb/TupleCache"
 import { readOnlyTupleDb } from "../tupleDb/TupleDb"
 import { ListArgs, Tuple, TupleTx, WriteArgs } from "../tupleDb/types"
@@ -150,7 +150,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 			this.handleSyncResponse(res.clock, res.updates)
 
 			// Insert the data snapshot into cache
-			this.dataCache.insert(args, res.data)
+			this.dataCache.insert([{ args, result: res.data }])
 
 			return res.data
 		} catch (e) {
@@ -342,7 +342,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 
 		this.syncedClock = serverClock
 		// Update clock in cache
-		this.cache.apply({ set: [{ key: ["clock"], value: this.syncedClock }] })
+		this.cache.insert(writeToInsert({ set: [{ key: ["clock"], value: this.syncedClock }] }))
 
 		// 2. Apply Server Updates
 		for (const commit of updates) {
@@ -364,7 +364,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		// Also record history
 		writes.set!.push({ key: ["history", commit.clock], value: commit })
 
-		this.cache.apply(writes)
+		this.cache.insert(writeToInsert(writes))
 	}
 
 	private reapplyPending(p: PendingCommit<R>) {

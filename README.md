@@ -82,7 +82,7 @@ const listUsersArg = { gt: ["users"], lt: ["users", "\xff"], limit: 100 }
 const data = db.list(listUsersArg)
 
 // Insert data into the cache overwriting any previous data in that range.
-cache.insert(listUsersArg, data)
+cache.insert([{ args: listUsersArg, result: data }])
 
 // Optimistically write data into the cache.
 const finalize = cache.write({ key, value })
@@ -90,7 +90,7 @@ const finalize = cache.write({ key, value })
 // Write to the database
 db.write({ key, value })
 // Once the write succeeds, we can insert it into the cache and finalize the optimistic write
-cache.insert({ gte: key, lte: key }, [{ key, value }])
+cache.insert([{ args: { gte: key, lte: key }, result: [{ key, value }] }])
 finalize()
 
 // Subscribe to a query.

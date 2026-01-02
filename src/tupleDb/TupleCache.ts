@@ -2,7 +2,6 @@ import {
 	EncodeSubspaceListArgs,
 	KeyDecodeCacheListResult,
 	KeyEncodeList,
-	KeyEncodeListArgs,
 	KeyEncodeWrite,
 	TupleSubspaceEncoder,
 } from "./Encoder"
@@ -32,10 +31,12 @@ export class TupleCache implements TupleCacheApi {
 		return TupleSubspaceEncoder(this.prefix)
 	}
 
-	insert = (args: ListArgs<Tuple>, result: { key: Tuple; value: JSONValue }[]) => {
-		const fullArgs = KeyEncodeListArgs(args, this.encoder)
-		const fullResult = KeyEncodeList(result, this.encoder)
-		this.cache.insert(fullArgs, fullResult)
+	insert = (items: { args: ListArgs<Tuple>; result: { key: Tuple; value: JSONValue }[] }[]) => {
+		const fullItems = items.map(({ args, result }) => ({
+			args: EncodeSubspaceListArgs(args, this.prefix),
+			result: KeyEncodeList(result, this.encoder),
+		}))
+		this.cache.insert(fullItems)
 	}
 
 	list = (args: ListArgs<Tuple>) => {
@@ -56,12 +57,7 @@ export class TupleCache implements TupleCacheApi {
 	}
 
 	subscribe = (range: Range<Tuple>, fn: () => void) => {
-		const fullRange = KeyEncodeListArgs(range, this.encoder)
+		const fullRange = EncodeSubspaceListArgs(range, this.prefix)
 		return this.cache.subscribe(fullRange, fn)
-	}
-
-	apply = (changes: WriteArgs<Tuple, JSONValue>) => {
-		const fullChanges = KeyEncodeWrite(changes, this.encoder)
-		this.cache.apply(fullChanges)
 	}
 }

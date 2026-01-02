@@ -127,8 +127,8 @@ describe("computeCachedRange", () => {
 describe("OkvCache", () => {
 	it("works", () => {
 		const cache = new OkvCache()
-		cache.insert({ gte: "05", lt: "10" }, kv(5, 9))
-		cache.insert({ gt: "15", lte: "20" }, kv(6, 20))
+		cache.insert([{ args: { gte: "05", lt: "10" }, result: kv(5, 9) }])
+		cache.insert([{ args: { gt: "15", lte: "20" }, result: kv(6, 20) }])
 
 		const get = (key: string) => {
 			const result = cache.list({ gte: key, lte: key })
@@ -161,8 +161,8 @@ describe("OkvCache", () => {
 
 	it("Joined ranges", () => {
 		const cache = new OkvCache()
-		cache.insert({ limit: 2 }, kv(0, 1))
-		cache.insert({ gt: "01", limit: 2 }, kv(2, 3))
+		cache.insert([{ args: { limit: 2 }, result: kv(0, 1) }])
+		cache.insert([{ args: { gt: "01", limit: 2 }, result: kv(2, 3) }])
 
 		assert.deepEqual(cache.list({ limit: 3 }), { hit: kv(0, 2) })
 		assert.deepEqual(cache.list({ limit: 4 }), { hit: kv(0, 3) })
@@ -171,8 +171,8 @@ describe("OkvCache", () => {
 
 	it("Joined ranges - reversed", () => {
 		const cache = new OkvCache()
-		cache.insert({ limit: 2, reverse: true }, kv(2, 3).reverse())
-		cache.insert({ lt: "02", limit: 2, reverse: true }, kv(0, 1).reverse())
+		cache.insert([{ args: { limit: 2, reverse: true }, result: kv(2, 3).reverse() }])
+		cache.insert([{ args: { lt: "02", limit: 2, reverse: true }, result: kv(0, 1).reverse() }])
 
 		assert.deepEqual(cache.list({ limit: 3, reverse: true }), { hit: kv(1, 3).reverse() })
 		assert.deepEqual(cache.list({ limit: 4, reverse: true }), { hit: kv(0, 3).reverse() })
@@ -183,14 +183,14 @@ describe("OkvCache", () => {
 		// writing to a cache, then inserting on top of it doesn't overwrite the pending writes.
 		const cache = new OkvCache()
 
-		cache.insert({ gte: "00", lte: "10" }, kv(0, 10))
+		cache.insert([{ args: { gte: "00", lte: "10" }, result: kv(0, 10) }])
 		const cleanup1 = cache.write({ set: [{ key: "00", value: "xx" }], delete: ["10"] })
 		assert.deepEqual(cache.list({ gte: "00", lte: "10" }), {
 			hit: [{ key: "00", value: "xx" }, ...kv(1, 9)],
 		})
 
 		// Stays the same.
-		cache.insert({ gte: "00", lte: "10" }, kv(0, 10))
+		cache.insert([{ args: { gte: "00", lte: "10" }, result: kv(0, 10) }])
 		assert.deepEqual(cache.list({ gte: "00", lte: "10" }), {
 			hit: [{ key: "00", value: "xx" }, ...kv(1, 9)],
 		})
@@ -202,7 +202,7 @@ describe("OkvCache", () => {
 		})
 
 		// Stays the same.
-		cache.insert({ gte: "00", lte: "10" }, kv(0, 10))
+		cache.insert([{ args: { gte: "00", lte: "10" }, result: kv(0, 10) }])
 		assert.deepEqual(cache.list({ gte: "00", lte: "10" }), {
 			hit: [{ key: "00", value: "yy" }, ...kv(1, 9)],
 		})
@@ -216,7 +216,7 @@ describe("OkvCache", () => {
 			hit: [{ key: "00", value: "yy" }, ...kv(1, 9)],
 		})
 		// Overwrites 10 but not 00.
-		cache.insert({ gte: "00", lte: "10" }, kv(0, 10))
+		cache.insert([{ args: { gte: "00", lte: "10" }, result: kv(0, 10) }])
 		assert.deepEqual(cache.list({ gte: "00", lte: "10" }), {
 			hit: [{ key: "00", value: "yy" }, ...kv(1, 10)],
 		})
@@ -228,7 +228,7 @@ describe("OkvCache", () => {
 		})
 
 		// Overwrites 10 but not 00.
-		cache.insert({ gte: "00", lte: "10" }, kv(0, 10))
+		cache.insert([{ args: { gte: "00", lte: "10" }, result: kv(0, 10) }])
 		assert.deepEqual(cache.list({ gte: "00", lte: "10" }), { hit: kv(0, 10) })
 	})
 
