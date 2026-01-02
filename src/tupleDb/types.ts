@@ -29,11 +29,6 @@ export type CacheListResult<K, V> = {
 	prefix?: { key: K; value: V }[]
 }
 
-/**
- * This type is useful for implementing subspace. We intentionally don't include the
- * data or the ranges of the cache on this type so we can create a subspace without
- * copying all that data.
- */
 export type OkvCache<K, V> = {
 	apply: (changes: WriteArgs<K, V>) => void
 	insert: (args: ListArgs<K>, result: { key: K; value: V }[]) => void
@@ -44,11 +39,6 @@ export type OkvCache<K, V> = {
 	subscribe: (range: Range<K>, fn: () => void) => () => void
 }
 
-/**
- * Similar to BaseOKVCache, this is useful for building compositional abstractions.
- * But in other situations you're going to want the actual Transaction class so that
- * you can inspect the pending writes, etc.
- */
 export type OkvTx<K, V> = Okv<K, V> & {
 	committed: boolean
 	commit: () => void
@@ -86,23 +76,6 @@ export type TupleTx = TupleOkvTx & {
 	subspace: (prefix: Tuple) => TupleDb
 }
 
-// ==========================================================================
-// TODO: maybe remove this...
-
-export type Index = {
-	id: string
-	// secondary indexes are 0, tertiary indexes are 1.
-	order: number
-	range: ListArgs<Tuple>
-	set: (db: TupleOkv, key: Tuple, value: JSONValue) => void
-	delete: (db: TupleOkv, key: Tuple) => void
-}
-
-export type IndexableOKV = {
-	createIndex(index: Index): void
-	deleteIndex(id: string): void
-}
-
-export type ITupleCache = OkvCache<Tuple, JSONValue> & {
-	subspace: (prefix: Tuple) => ITupleCache
+export type TupleCache = OkvCache<Tuple, JSONValue> & {
+	subspace: (prefix: Tuple) => TupleCache
 }

@@ -1,12 +1,19 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { recordDb, Schema, Query } from "./RecordLayer"
 import { tupleDb } from "../tupleDb/TupleDb"
+import { Query, recordDb, Schema } from "./RecordLayer"
 
 // --- Helper for Ground Truth ---
 type User = { type: "user"; id: string; name: string; age?: number }
 type Product = { type: "product"; id: string; name: string; price: number }
-type Order = { type: "order"; id: string; userId: string; productId: string; quantity: number; date: string }
+type Order = {
+	type: "order"
+	id: string
+	userId: string
+	productId: string
+	quantity: number
+	date: string
+}
 
 const FUZZ_SCHEMA: Schema = {
 	types: {
@@ -27,7 +34,10 @@ function deepClone<T>(obj: T): T {
 	return JSON.parse(JSON.stringify(obj))
 }
 
-function applyOperationToGroundTruth(gt: GroundTruthDb, op: { type: string; record: any; deleted?: boolean }) {
+function applyOperationToGroundTruth(
+	gt: GroundTruthDb,
+	op: { type: string; record: any; deleted?: boolean }
+) {
 	const recordType = op.record.type
 	if (recordType === "user") {
 		gt.users = gt.users.filter((r) => r.id !== op.record.id)
@@ -87,7 +97,9 @@ function queryGroundTruth(gt: GroundTruthDb, query: Query): any[] {
 					for (const [otherMyField, otherTargetPath] of Object.entries(otherNode.on)) {
 						const [otherTargetAlias, otherTargetField] = otherTargetPath.split(".")
 						if (otherTargetAlias === alias && newBound[otherTargetAlias]) {
-							if (newBound[otherAlias][otherMyField] !== newBound[otherTargetAlias][otherTargetField]) {
+							if (
+								newBound[otherAlias][otherMyField] !== newBound[otherTargetAlias][otherTargetField]
+							) {
 								valid = false
 								break
 							}
@@ -170,8 +182,8 @@ function queryGroundTruth(gt: GroundTruthDb, query: Query): any[] {
 		}
 		// For now, simple ground truth doesn't simulate removal from aggregations correctly for min/max
 		// This ground truth is for current state, not incremental.
-		results = Array.from(groups.values()).filter(g => g.__ref > 0)
-		results.forEach(r => delete r.__ref) // Clean up internal ref count
+		results = Array.from(groups.values()).filter((g) => g.__ref > 0)
+		results.forEach((r) => delete r.__ref) // Clean up internal ref count
 	} else {
 		results = matchedRows
 	}
@@ -284,67 +296,93 @@ describe("TupleDB Fuzz Testing (Simple)", { timeout: 60000 }, () => {
 		for (let i = 0; i < numOps; i++) {
 			const operationType = randomInt(1, 4) // 1: create/update user, 2: create/update product, 3: create/update order, 4: delete
 
-			if (operationType === 1) { // User op
-				const id = userIds.length < maxEntities ? randomId() : userIds[randomInt(0, userIds.length - 1)]
+			if (operationType === 1) {
+				// User op
+				const id =
+					userIds.length < maxEntities ? randomId() : userIds[randomInt(0, userIds.length - 1)]
 				const name = randomId()
 				const age = randomInt(10, 80)
 				const user: User = { type: "user", id, name, age }
 				layer.set(user)
 				applyOperationToGroundTruth(groundTruth, { type: "user", record: user })
 				if (!userIds.includes(id)) userIds.push(id)
-			} else if (operationType === 2) { // Product op
-				const id = productIds.length < maxEntities ? randomId() : productIds[randomInt(0, productIds.length - 1)]
+			} else if (operationType === 2) {
+				// Product op
+				const id =
+					productIds.length < maxEntities
+						? randomId()
+						: productIds[randomInt(0, productIds.length - 1)]
 				const name = randomId()
 				const price = randomInt(1, 100)
 				const product: Product = { type: "product", id, name, price }
 				layer.set(product)
 				applyOperationToGroundTruth(groundTruth, { type: "product", record: product })
 				if (!productIds.includes(id)) productIds.push(id)
-			} else if (operationType === 3) { // Order op
+			} else if (operationType === 3) {
+				// Order op
 				if (userIds.length > 0 && productIds.length > 0) {
-					const id = orderIds.length < maxEntities ? randomId() : orderIds[randomInt(0, orderIds.length - 1)]
+					const id =
+						orderIds.length < maxEntities ? randomId() : orderIds[randomInt(0, orderIds.length - 1)]
 					const userId = userIds[randomInt(0, userIds.length - 1)]
 					const productId = productIds[randomInt(0, productIds.length - 1)]
 					const quantity = randomInt(1, 5)
-					const date = `2023-${randomInt(1, 12).toString().padStart(2, '0')}-${randomInt(1, 28).toString().padStart(2, '0')}`
+					const date = `2023-${randomInt(1, 12).toString().padStart(2, "0")}-${randomInt(1, 28).toString().padStart(2, "0")}`
 					const order: Order = { type: "order", id, userId, productId, quantity, date }
 					layer.set(order)
 					applyOperationToGroundTruth(groundTruth, { type: "order", record: order })
 					if (!orderIds.includes(id)) orderIds.push(id)
 				}
-			} else if (operationType === 4) { // Delete op
+			} else if (operationType === 4) {
+				// Delete op
 				const deleteType = randomInt(1, 3)
 				if (deleteType === 1 && userIds.length > 0) {
 					const id = userIds[randomInt(0, userIds.length - 1)]
 					layer.delete({ type: "user", id })
-					applyOperationToGroundTruth(groundTruth, { type: "user", record: { id, type: "user" }, deleted: true })
-					userIds = userIds.filter(x => x !== id)
+					applyOperationToGroundTruth(groundTruth, {
+						type: "user",
+						record: { id, type: "user" },
+						deleted: true,
+					})
+					userIds = userIds.filter((x) => x !== id)
 				} else if (deleteType === 2 && productIds.length > 0) {
 					const id = productIds[randomInt(0, productIds.length - 1)]
 					layer.delete({ type: "product", id })
-					applyOperationToGroundTruth(groundTruth, { type: "product", record: { id, type: "product" }, deleted: true })
-					productIds = productIds.filter(x => x !== id)
+					applyOperationToGroundTruth(groundTruth, {
+						type: "product",
+						record: { id, type: "product" },
+						deleted: true,
+					})
+					productIds = productIds.filter((x) => x !== id)
 				} else if (deleteType === 3 && orderIds.length > 0) {
 					const id = orderIds[randomInt(0, orderIds.length - 1)]
 					layer.delete({ type: "order", id })
-					applyOperationToGroundTruth(groundTruth, { type: "order", record: { id, type: "order" }, deleted: true })
-					orderIds = orderIds.filter(x => x !== id)
+					applyOperationToGroundTruth(groundTruth, {
+						type: "order",
+						record: { id, type: "order" },
+						deleted: true,
+					})
+					orderIds = orderIds.filter((x) => x !== id)
 				}
 			}
-			
+
 			// Run random queries and compare
-			if (i % 10 === 0) { // Check every few operations
+			if (i % 10 === 0) {
+				// Check every few operations
 				const queryIndex = randomInt(0, FUZZ_QUERIES.length - 1)
 				const query = FUZZ_QUERIES[queryIndex]
 
 				const layerResult = layer.query(query)
 				const gtResult = queryGroundTruth(groundTruth, query)
-				
+
 				// console.log("Query:", queryIndex, query)
 				// console.log("Layer:", layerResult)
 				// console.log("GT:", gtResult)
 
-				assert.deepStrictEqual(layerResult, gtResult, `Mismatch for query ${queryIndex} at iteration ${i}`)
+				assert.deepStrictEqual(
+					layerResult,
+					gtResult,
+					`Mismatch for query ${queryIndex} at iteration ${i}`
+				)
 			}
 		}
 	})

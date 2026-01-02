@@ -1,7 +1,7 @@
 import { omit } from "lodash-es"
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { Cache, cachedRange, keyToRange } from "./Cache"
+import { OkvCache, cachedRange, keyToRange } from "./OkvCache"
 import { Range } from "./Range"
 import { ListArgs } from "./types"
 
@@ -124,9 +124,9 @@ describe("computeCachedRange", () => {
 	})
 })
 
-describe("Cache", () => {
+describe("OkvCache", () => {
 	it("works", () => {
-		const cache = new Cache()
+		const cache = new OkvCache()
 		cache.insert({ gte: "05", lt: "10" }, kv(5, 9))
 		cache.insert({ gt: "15", lte: "20" }, kv(6, 20))
 
@@ -160,7 +160,7 @@ describe("Cache", () => {
 	})
 
 	it("Joined ranges", () => {
-		const cache = new Cache()
+		const cache = new OkvCache()
 		cache.insert({ limit: 2 }, kv(0, 1))
 		cache.insert({ gt: "01", limit: 2 }, kv(2, 3))
 
@@ -170,7 +170,7 @@ describe("Cache", () => {
 	})
 
 	it("Joined ranges - reversed", () => {
-		const cache = new Cache()
+		const cache = new OkvCache()
 		cache.insert({ limit: 2, reverse: true }, kv(2, 3).reverse())
 		cache.insert({ lt: "02", limit: 2, reverse: true }, kv(0, 1).reverse())
 
@@ -181,7 +181,7 @@ describe("Cache", () => {
 
 	it("Optimistic writes", () => {
 		// writing to a cache, then inserting on top of it doesn't overwrite the pending writes.
-		const cache = new Cache()
+		const cache = new OkvCache()
 
 		cache.insert({ gte: "00", lte: "10" }, kv(0, 10))
 		const cleanup1 = cache.write({ set: [{ key: "00", value: "xx" }], delete: ["10"] })
@@ -246,7 +246,7 @@ describe("Cache", () => {
 	}
 
 	it("subscribe / emit", () => {
-		const cache = new Cache()
+		const cache = new OkvCache()
 		const cb1 = func()
 		const cb2 = func()
 		const unsub1 = cache.subscribe({ gte: "05", lt: "10" }, cb1)

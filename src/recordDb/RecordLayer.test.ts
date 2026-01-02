@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { recordDb, Schema } from "./RecordLayer"
 import { tupleDb } from "../tupleDb/TupleDb"
 import { TupleDb } from "../tupleDb/types"
+import { recordDb, Schema } from "./RecordLayer"
 
 // Types for the social app
 type User = { type: "user"; id: string; name: string; age?: number; bio?: string }
@@ -269,7 +269,7 @@ describe("TupleDB Edge Cases & Complex Logic", () => {
 		const layer = setup(db)
 
 		layer.set({ type: "user", id: "u1", name: "A", age: 10 })
-		
+
 		const q = {
 			match: { u: { from: "user" } },
 			sort: ["u.age", "u.id"],
@@ -280,7 +280,7 @@ describe("TupleDB Edge Cases & Complex Logic", () => {
 
 		// Change age
 		layer.set({ type: "user", id: "u1", name: "A", age: 99 })
-		
+
 		res = layer.query(q)
 		assert.equal(res[0]["u.age"], 99)
 	})
@@ -290,7 +290,7 @@ describe("TupleDB Edge Cases & Complex Logic", () => {
 		const layer = setup(db)
 
 		layer.set({ type: "user", id: "u1", name: "A" })
-		
+
 		// 3 posts: 10, 20, 20
 		layer.set({ type: "post", id: "p1", authorId: "u1", createdAt: "10", body: "" })
 		layer.set({ type: "post", id: "p2", authorId: "u1", createdAt: "20", body: "" })
@@ -351,7 +351,7 @@ describe("TupleDB Edge Cases & Complex Logic", () => {
 
 		// Create user now
 		layer.set({ type: "user", id: "missing", name: "Found" })
-		
+
 		// Should appear now (Reactive join)
 		const res2 = layer.query(q)
 		assert.equal(res2.length, 1)

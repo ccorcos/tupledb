@@ -1,6 +1,5 @@
-import { cloneDeep, isEqual, union } from "lodash-es"
-import { compactObj } from "../shared/compactObj"
-import { ListArgs, Tuple, TupleDb } from "../tupleDb/types"
+import { cloneDeep } from "lodash-es"
+import { Tuple, TupleDb } from "../tupleDb/types"
 
 // ============================================================================
 // Types
@@ -140,7 +139,7 @@ function ensureDependencies(db: TupleDb, schema: Schema, def: IndexDefinition) {
 		const neededSort = Object.keys(node.on).sort()
 		const depQuery: Query = {
 			match: { t: { from: node.from } },
-			sort: neededSort.map(k => `t.${k}`),
+			sort: neededSort.map((k) => `t.${k}`),
 		}
 		const depName = getCanonicalIndexName(depQuery)
 		if (!schema.indexes[depName]) {
@@ -159,7 +158,7 @@ function backfillIndex(db: TupleDb, schema: Schema, indexName: string) {
 
 	for (const row of results) {
 		if (def.where && !matchWhere(row, def.where)) continue
-		
+
 		if (def.reduce) {
 			updateAggregationState(db, schema, indexName, def, row, 1)
 		} else {
@@ -235,16 +234,16 @@ function updateAggregationState(
 	const stateKeyPrefix = ["_agg_state", indexName, ...groupKey]
 
 	const oldStateRaw = db.get(stateKeyPrefix)
-	const oldState = oldStateRaw ? (oldStateRaw as any) : {} 
+	const oldState = oldStateRaw ? (oldStateRaw as any) : {}
 
 	const newState = cloneDeep(oldState)
-	
+
 	// Track reference count for the group
 	newState.__ref = (newState.__ref || 0) + delta
 
 	for (const [alias, aggDef] of Object.entries(def.reduce!.aggregate)) {
-		const op = Object.keys(aggDef)[0] 
-		const fieldPath = aggDef[op] 
+		const op = Object.keys(aggDef)[0]
+		const fieldPath = aggDef[op]
 
 		if (op === "count") {
 			newState[alias] = (newState[alias] || 0) + delta
@@ -252,13 +251,15 @@ function updateAggregationState(
 			const val = safeGet(row, fieldPath)
 			// Key: [..., val, ...identity]
 			const identity = getRowIdentityKey(schema, def.match, row)
-			const valIndexKey = ["_agg_vals", indexName, alias, ...groupKey, val, ...identity] 
-			
+			const valIndexKey = ["_agg_vals", indexName, alias, ...groupKey, val, ...identity]
+
 			if (delta > 0) db.set(valIndexKey, 1)
 			else db.delete(valIndexKey)
 
 			// Find max
-			const last = db.subspace(["_agg_vals", indexName, alias, ...groupKey]).list({ limit: 1, reverse: true })
+			const last = db
+				.subspace(["_agg_vals", indexName, alias, ...groupKey])
+				.list({ limit: 1, reverse: true })
 			if (last.length > 0) {
 				// Key relative to subspace is [val, ...identity]
 				newState[alias] = last[0].key[0]
@@ -274,11 +275,11 @@ function updateAggregationState(
 	// Scope 2 = groupBy + aggregate aliases.
 	const scope2Vars = [...groupBy, ...Object.keys(def.reduce!.aggregate)].sort()
 	const sortVars = def.sort || []
-	const payloadVars = scope2Vars.filter(v => !sortVars.includes(v))
+	const payloadVars = scope2Vars.filter((v) => !sortVars.includes(v))
 
 	// Helper to construct key part
 	const makeKeyPart = (state: any, vars: string[]) => {
-		return vars.map(path => {
+		return vars.map((path) => {
 			if (state[path] !== undefined) return state[path]
 			const groupIdx = groupBy.indexOf(path)
 			if (groupIdx !== -1) return groupKey[groupIdx]
@@ -292,14 +293,14 @@ function updateAggregationState(
 		if (oldState.__ref > 0) {
 			const oldSortKey = makeKeyPart(oldState, sortVars)
 			const oldPayload = makeKeyPart(oldState, payloadVars)
-			
+
 			increment(db, [indexName, ...oldSortKey, ...oldPayload], -1)
 		}
 	}
 
 	// Add New
 	const hasData = newState.__ref > 0
-	
+
 	if (hasData) {
 		const newSortKey = makeKeyPart(newState, sortVars)
 		const newPayload = makeKeyPart(newState, payloadVars)
@@ -369,31 +370,26 @@ function verifyConstraints(bound: Record<string, any>, matchDef: MatchDef): bool
 	return true
 }
 
-function simpleQuery(
-	db: TupleDb,
-	schema: Schema,
-	type: string,
-	where: Record<string, any>
-): any[] {
+function simpleQuery(db: TupleDb, schema: Schema, type: string, where: Record<string, any>): any[] {
 	const typeDef = schema.types[type]
-	
-	if (typeDef.primary.every(k => where[k] !== undefined)) {
-		const pk = typeDef.primary.map(k => where[k])
+
+	if (typeDef.primary.every((k) => where[k] !== undefined)) {
+		const pk = typeDef.primary.map((k) => where[k])
 		const val = db.get([type, "primary", ...pk])
 		return val ? [val] : []
 	}
 
 	for (const [name, def] of Object.entries(schema.indexes)) {
-		if (!def.sort) continue 
+		if (!def.sort) continue
 		const aliases = Object.keys(def.match)
 		if (aliases.length !== 1) continue
 		const alias = aliases[0]
 		if (def.match[alias].from !== type) continue
-		if (def.where) continue 
-		
+		if (def.where) continue
+
 		const sortKeys = def.sort
 		const whereKeys = Object.keys(where)
-		
+
 		const prefix: any[] = []
 		let covered = 0
 		for (const k of sortKeys) {
@@ -401,7 +397,7 @@ function simpleQuery(
 			// k is "t.authorId". where has "authorId".
 			// Map k to rawKey
 			const rawKey = k.startsWith(`${alias}.`) ? k.slice(alias.length + 1) : k
-			
+
 			if (where[rawKey] !== undefined) {
 				prefix.push(where[rawKey])
 				covered++
@@ -411,16 +407,23 @@ function simpleQuery(
 		}
 
 		if (covered === whereKeys.length && covered > 0) {
-			return db.subspace([name, ...prefix]).list().map(({key}) => {
-				const pkLen = typeDef.primary.length
-				const pkVals = key.slice(key.length - pkLen)
-				return db.get([type, "primary", ...pkVals])
-			}).filter(x => x) as any[]
+			return db
+				.subspace([name, ...prefix])
+				.list()
+				.map(({ key }) => {
+					const pkLen = typeDef.primary.length
+					const pkVals = key.slice(key.length - pkLen)
+					return db.get([type, "primary", ...pkVals])
+				})
+				.filter((x) => x) as any[]
 		}
 	}
-	
-	const all = db.subspace([type, "primary"]).list().map(x => x.value)
-	return all.filter(r => matchWhere(r, where))
+
+	const all = db
+		.subspace([type, "primary"])
+		.list()
+		.map((x) => x.value)
+	return all.filter((r) => matchWhere(r, where))
 }
 
 // ============================================================================
@@ -429,72 +432,78 @@ function simpleQuery(
 
 function processQuery(db: TupleDb, schema: Schema, q: Query): any[] {
 	const existing = hasIndex(schema, q)
-	
+
 	if (existing) {
 		const def = schema.indexes[existing]
-		
+
 		if (def.reduce) {
-			return db.subspace([existing]).list().map(({ key }) => {
-				const obj: any = {}
-				const sortFields = def.sort || []
-				
-				const groupBy = def.reduce!.groupBy
-				const scope2Vars = [...groupBy, ...Object.keys(def.reduce!.aggregate)].sort()
-				const payloadVars = scope2Vars.filter(v => !sortFields.includes(v))
-				
-				let idx = 0
-				
-				// Extract Sort
-				sortFields.forEach(f => {
-					obj[f] = key[idx++]
+			return db
+				.subspace([existing])
+				.list()
+				.map(({ key }) => {
+					const obj: any = {}
+					const sortFields = def.sort || []
+
+					const groupBy = def.reduce!.groupBy
+					const scope2Vars = [...groupBy, ...Object.keys(def.reduce!.aggregate)].sort()
+					const payloadVars = scope2Vars.filter((v) => !sortFields.includes(v))
+
+					let idx = 0
+
+					// Extract Sort
+					sortFields.forEach((f) => {
+						obj[f] = key[idx++]
+					})
+
+					// Extract Payload
+					payloadVars.forEach((f) => {
+						obj[f] = key[idx++]
+					})
+
+					return obj
 				})
-				
-				// Extract Payload
-				payloadVars.forEach(f => {
-					obj[f] = key[idx++]
-				})
-				
-				return obj
-			})
 		} else {
 			// Flat Scan
-			return db.subspace([existing]).list().map(({ key }) => {
-				const rowObj: any = {}
-				const sortFields = def.sort || []
-				
-				key.slice(0, sortFields.length).forEach((val, i) => {
-					rowObj[sortFields[i]] = val
-				})
-				
-				const result: any = {}
-				const aliases = Object.keys(def.match).sort()
-				
-				// console.log("SCAN ROW", key, rowObj)
+			return db
+				.subspace([existing])
+				.list()
+				.map(({ key }) => {
+					const rowObj: any = {}
+					const sortFields = def.sort || []
 
-				let idx = key.length
-				
-				// Iterate aliases backwards
-				for (let i = aliases.length - 1; i >= 0; i--) {
-					const alias = aliases[i]
-					const type = def.match[alias].from
-					const typeDef = schema.types[type]
-					const pkLen = typeDef.primary.length
-					
-					const pkVals = key.slice(idx - pkLen, idx)
-					idx -= pkLen
-					
-					const rec = db.get([type, "primary", ...pkVals])
-					// console.log("HYDRATE", alias, type, pkVals, rec)
-					if (rec) {
-						for (const [k, v] of Object.entries(rec)) {
-							result[`${alias}.${k}`] = v
+					key.slice(0, sortFields.length).forEach((val, i) => {
+						rowObj[sortFields[i]] = val
+					})
+
+					const result: any = {}
+					const aliases = Object.keys(def.match).sort()
+
+					// console.log("SCAN ROW", key, rowObj)
+
+					let idx = key.length
+
+					// Iterate aliases backwards
+					for (let i = aliases.length - 1; i >= 0; i--) {
+						const alias = aliases[i]
+						const type = def.match[alias].from
+						const typeDef = schema.types[type]
+						const pkLen = typeDef.primary.length
+
+						const pkVals = key.slice(idx - pkLen, idx)
+						idx -= pkLen
+
+						const rec = db.get([type, "primary", ...pkVals])
+						// console.log("HYDRATE", alias, type, pkVals, rec)
+						if (rec) {
+							for (const [k, v] of Object.entries(rec)) {
+								result[`${alias}.${k}`] = v
+							}
 						}
 					}
-				}
-				
-				Object.assign(result, rowObj)
-				return result
-			})
+
+					Object.assign(result, rowObj)
+					return result
+				})
 		}
 	} else {
 		const { indexName } = createAutoIndex(db, schema, q)
@@ -508,7 +517,7 @@ function processQuery(db: TupleDb, schema: Schema, q: Query): any[] {
 
 function getCanonicalIndexName(def: IndexDefinition): string {
 	const parts: string[] = ["v5"]
-	
+
 	const aliases = Object.keys(def.match).sort()
 	parts.push("m")
 	for (const a of aliases) {
@@ -516,10 +525,10 @@ function getCanonicalIndexName(def: IndexDefinition): string {
 		parts.push(a, m.from)
 		if (m.on) {
 			const onKeys = Object.keys(m.on).sort()
-			parts.push("on", ...onKeys.map(k => `${k}-${m.on![k]}`))
+			parts.push("on", ...onKeys.map((k) => `${k}-${m.on![k]}`))
 		}
 	}
-	
+
 	if (def.where) {
 		parts.push("w")
 		const keys = Object.keys(def.where).sort()
@@ -527,7 +536,7 @@ function getCanonicalIndexName(def: IndexDefinition): string {
 			parts.push(k, JSON.stringify(def.where[k]))
 		}
 	}
-	
+
 	if (def.reduce) {
 		parts.push("r")
 		parts.push("g", ...def.reduce.groupBy.sort())
@@ -538,11 +547,11 @@ function getCanonicalIndexName(def: IndexDefinition): string {
 			parts.push(a, op, agg[op])
 		}
 	}
-	
+
 	if (def.sort) {
 		parts.push("s", ...def.sort)
 	}
-	
+
 	return parts.join("_").replace(/[^a-zA-Z0-9_]/g, "")
 }
 
@@ -633,13 +642,13 @@ export function recordDb(db: TupleDb): RecordDb {
 		get: (args) => {
 			const schema = getSchema()
 			const typeDef = schema.types[args.type]
-			const pk = typeDef.primary.map(k => args[k])
+			const pk = typeDef.primary.map((k) => args[k])
 			return db.get([args.type, "primary", ...pk])
 		},
 		delete: (args) => {
 			const schema = getSchema()
 			const typeDef = schema.types[args.type]
-			const pk = typeDef.primary.map(k => args[k])
+			const pk = typeDef.primary.map((k) => args[k])
 			const oldRecord = db.get([args.type, "primary", ...pk])
 			if (!oldRecord) return
 
@@ -650,7 +659,7 @@ export function recordDb(db: TupleDb): RecordDb {
 			const schema = getSchema()
 			const { type } = record
 			const typeDef = schema.types[type]
-			const pk = typeDef.primary.map(k => record[k])
+			const pk = typeDef.primary.map((k) => record[k])
 			const oldRecord = db.get([type, "primary", ...pk])
 
 			db.set([type, "primary", ...pk], record)

@@ -9,8 +9,8 @@
 	"scripts": {
 		"typecheck": "tsc --noEmit",
 		"prettier": "npx prettier src --write --list-different",
-		"lint": "run-s prettier typecheck",
-		"test": "node --import tsx --test src/**/*.test.ts"
+		"test": "node --import tsx --test src/**/*.test.ts",
+		"lint": "run-s prettier typecheck test"
 	},
 	"keywords": [],
 	"author": "",

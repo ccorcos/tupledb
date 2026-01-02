@@ -25,13 +25,13 @@ import {
 } from "./Range"
 import { RangeEmitter } from "./RangeEmitter"
 import { Transaction } from "./Transaction"
-import { CacheListResult, ListArgs, OkvCache, WriteArgs } from "./types"
+import { CacheListResult, ListArgs, OkvCache as OkvCacheApi, WriteArgs } from "./types"
 
 /**
  * The Cache keeps track of which data ranges are in the cache and respond with hit/miss/prefix.
  * It also handles reactivity and optimistic writes.
  */
-export class Cache<K, V> implements OkvCache<K, V> {
+export class OkvCache<K, V> implements OkvCacheApi<K, V> {
 	data: InMemoryOkv<K, V>
 	emitter: RangeEmitter<K>
 	ranges: OrderedList<Range<K>>

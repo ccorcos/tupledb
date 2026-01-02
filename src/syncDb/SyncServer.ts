@@ -1,7 +1,15 @@
 import { tupleTx } from "../tupleDb/TupleDb"
-import { TupleDb, Tuple, ListArgs } from "../tupleDb/types"
-import { syncDb, defaultReducers } from "./SyncDb"
-import { SyncResult, ReadResult, WriteResult, FetchResult, ReducerMap, Commit, SyncApi } from "./types"
+import { ListArgs, Tuple, TupleDb } from "../tupleDb/types"
+import { defaultReducers, syncDb } from "./SyncDb"
+import {
+	Commit,
+	FetchResult,
+	ReadResult,
+	ReducerMap,
+	SyncApi,
+	SyncResult,
+	WriteResult,
+} from "./types"
 
 export function syncServer(db: TupleDb, reducers: ReducerMap): SyncApi {
 	// Just submit writes, return confirmation (clock)
@@ -55,9 +63,7 @@ export function syncServer(db: TupleDb, reducers: ReducerMap): SyncApi {
 	// Fetch history updates since clock
 	async function fetch(scope: Tuple, sinceClock: number): Promise<FetchResult> {
 		const scopeDb = syncDb(db.subspace(scope), reducers)
-		const updates = scopeDb.history
-			.list({ gt: [sinceClock] })
-			.map(({ value }) => value as Commit)
+		const updates = scopeDb.history.list({ gt: [sinceClock] }).map(({ value }) => value as Commit)
 		return {
 			clock: scopeDb.clock(),
 			updates,
@@ -71,7 +77,11 @@ export function syncServer(db: TupleDb, reducers: ReducerMap): SyncApi {
 	}
 
 	// Composite: Fetch updates and Read data snapshot
-	async function read(scope: Tuple, range: ListArgs<Tuple>, syncedClock: number): Promise<ReadResult> {
+	async function read(
+		scope: Tuple,
+		range: ListArgs<Tuple>,
+		syncedClock: number
+	): Promise<ReadResult> {
 		const fetchRes = await fetch(scope, syncedClock)
 		const scopeDb = syncDb(db.subspace(scope), reducers)
 		const data = scopeDb.data.list(range)

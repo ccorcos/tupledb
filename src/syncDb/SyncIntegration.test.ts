@@ -5,11 +5,11 @@ import { ListArgs, Tuple } from "../tupleDb/types"
 import { SyncCache } from "./SyncClient"
 import { syncDb } from "./SyncDb"
 import { syncServer } from "./SyncServer"
-import { Commit, ReadResult, SyncResult, WriteResult, Pubsub, JSONValue, SyncApi } from "./types"
+import { Commit, JSONValue, Pubsub, ReadResult, SyncApi, SyncResult, WriteResult } from "./types"
 
 // Mock Pubsub
 const createPubsub = (): Pubsub => {
-	const listeners = new Set<{ tuple: Tuple, listener: (t: Tuple, v: JSONValue) => void }>()
+	const listeners = new Set<{ tuple: Tuple; listener: (t: Tuple, v: JSONValue) => void }>()
 	return {
 		publish: (tuple, value) => {
 			for (const { listener } of listeners) {
@@ -21,9 +21,9 @@ const createPubsub = (): Pubsub => {
 			const item = { tuple: [], listener }
 			listeners.add(item)
 			return () => {
-                listeners.delete(item)
-            }
-		}
+				listeners.delete(item)
+			}
+		},
 	}
 }
 
@@ -35,7 +35,7 @@ const createApi = (server: any): SyncApi & { setOnline: (status: boolean) => voi
 		// However, TypeScript might complain if we assign this object to SyncApi type variable and it has extra methods?
 		// No, extra methods are fine.
 		// BUT we need to cast or define an intersection type if we want to use setOnline later.
-		
+
 		setOnline: (status: boolean) => (online = status),
 
 		write: async (prefix: any[], commits: Commit[]): Promise<WriteResult> => {
@@ -57,7 +57,7 @@ const createApi = (server: any): SyncApi & { setOnline: (status: boolean) => voi
 			if (!online) throw new Error("Offline")
 			await new Promise((resolve) => setTimeout(resolve, 10))
 			return server.fetch(prefix, clock)
-		}
+		},
 	}
 }
 
@@ -79,7 +79,7 @@ describe("SyncDb Integration", () => {
 
 		// 1. Dispatch Optimistic Op
 		const msg1 = { id: "msg1", fromId: 1, text: "hello" }
-		session.write({}, ops => ops.sendMessage(msg1))
+		session.write({}, (ops) => ops.sendMessage(msg1))
 
 		// Verify optimistic update in Global Cache
 		const key = ["user", 1, "data", "inbox", "msg1"]
@@ -129,7 +129,7 @@ describe("SyncDb Integration", () => {
 		const session = cache.syncDb(["user", 1], reducers)
 
 		// 1. Dispatch optimistic write on client
-		session.write({}, ops => ops.setDoc([["doc", "4"], "v4"]))
+		session.write({}, (ops) => ops.setDoc([["doc", "4"], "v4"]))
 
 		// 2. Client requests range
 		const { remote } = session.data.subscribe({ gte: ["doc", "1"], lte: ["doc", "2"] }, () => {})
@@ -178,12 +178,12 @@ describe("SyncDb Integration", () => {
 		const cache = new SyncCache({ api, pubsub })
 		const session = cache.syncDb(["feed"], reducers)
 
-		session.write({}, ops => ops.post({ id: "p1", content: "hello" }))
+		session.write({}, (ops) => ops.post({ id: "p1", content: "hello" }))
 
-		// With syncMetadata removed, we can't easily test the "server override via metadata" scenario 
+		// With syncMetadata removed, we can't easily test the "server override via metadata" scenario
 		// in the same way (where the reducer reads the committedAt time).
 		// However, we can still verify that the sync happens and data eventually converges.
-		
+
 		await new Promise((r) => setTimeout(r, 50))
 
 		const finalRes = session.data.list({ gte: ["posts", "p1"], lte: ["posts", "p1"] })

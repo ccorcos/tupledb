@@ -1,33 +1,10 @@
-import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb, WriteArgs, OkvCache, ITupleCache } from "../tupleDb/types"
+import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb, WriteArgs } from "../tupleDb/types"
 
 export type JSONValue = any
 
 // ==========================================================================
-// Sync Core Types
+// SyncDb Types
 // ==========================================================================
-
-export interface ISyncCache {
-	syncDb<R extends ReducerMap>(prefix: Tuple, reducers: R): IClientSyncDb<R>
-}
-
-export interface IClientSyncDb<R extends ReducerMap> {
-	clock: () => number
-	data: ReadOnlyTupleDb & {
-		subscribe: (args: ListArgs<Tuple>, listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void) => SubscribeResult
-	}
-	history: {
-		list: (args?: ListArgs<Tuple>) => { key: Tuple; value: any }[]
-	}
-	pending: {
-		list: () => Commit<R>[]
-	}
-	write: {
-		(commit: CommitArgs<R> | Commit<R>): void
-		(meta: CommitMeta, build: (ops: OpsBuilder<R>) => void): void
-		(build: (ops: OpsBuilder<R>) => void): void
-	}
-	sync: () => Promise<void>
-}
 
 export type Reducer = (tx: TupleDb, ...args: any[]) => void
 export type ReducerMap = Record<string, Reducer>
@@ -63,18 +40,6 @@ export type Commit<R extends ReducerMap = ReducerMap> = {
 	ops: Op<R>[]
 }
 
-export type PendingCommit<R extends ReducerMap> = {
-	commit: Commit<R>
-	cleanup: () => void
-	changes: WriteArgs<Tuple, JSONValue>
-}
-
-export type SubscribeResult = {
-	local: { hit?: any[]; miss?: boolean; prefix?: any[] }
-	remote: Promise<any[]>
-	unsubscribe: () => void
-}
-
 export type SyncDb<R extends ReducerMap> = {
 	clock: () => number
 	history: ReadOnlyTupleDb
@@ -87,7 +52,49 @@ export type SyncDb<R extends ReducerMap> = {
 }
 
 // ==========================================================================
-// Sync Transport / Server Types
+// SyncDbClient Types
+// ==========================================================================
+
+export interface ISyncCache {
+	syncDb<R extends ReducerMap>(prefix: Tuple, reducers: R): IClientSyncDb<R>
+}
+
+export interface IClientSyncDb<R extends ReducerMap> {
+	clock: () => number
+	data: ReadOnlyTupleDb & {
+		subscribe: (
+			args: ListArgs<Tuple>,
+			listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void
+		) => SubscribeResult
+	}
+	history: {
+		list: (args?: ListArgs<Tuple>) => { key: Tuple; value: any }[]
+	}
+	pending: {
+		list: () => Commit<R>[]
+	}
+	write: {
+		(commit: CommitArgs<R> | Commit<R>): void
+		(meta: CommitMeta, build: (ops: OpsBuilder<R>) => void): void
+		(build: (ops: OpsBuilder<R>) => void): void
+	}
+	sync: () => Promise<void>
+}
+
+export type PendingCommit<R extends ReducerMap> = {
+	commit: Commit<R>
+	cleanup: () => void
+	changes: WriteArgs<Tuple, JSONValue>
+}
+
+export type SubscribeResult = {
+	local: { hit?: any[]; miss?: boolean; prefix?: any[] }
+	remote: Promise<any[]>
+	unsubscribe: () => void
+}
+
+// ==========================================================================
+// SyncDb API Types
 // ==========================================================================
 
 // Explicit Sync Server API Responses

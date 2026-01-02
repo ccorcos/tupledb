@@ -1,14 +1,25 @@
-import { Cache, cachedRange } from "../tupleDb/Cache"
-import { TupleCache } from "../tupleDb/TupleCache"
-import { codec } from "../tupleDb/Codec"
-import { readOnlyTupleDb, tupleTx } from "../tupleDb/TupleDb"
-import { ListArgs, ReadOnlyTupleDb, Tuple, TupleTx, WriteArgs, ITupleCache } from "../tupleDb/types"
-import { defaultReducers } from "./SyncDb"
-import { Commit, JSONValue, Op, PendingCommit, Pubsub, ReducerMap, SubscribeResult, SyncApi, ISyncCache, IClientSyncDb } from "./types"
 import { randomId } from "../shared/randomId"
+import { codec } from "../tupleDb/Codec"
+import { OkvCache, cachedRange } from "../tupleDb/OkvCache"
+import { TupleCache } from "../tupleDb/TupleCache"
+import { readOnlyTupleDb } from "../tupleDb/TupleDb"
+import { ListArgs, Tuple, TupleTx, WriteArgs } from "../tupleDb/types"
+import { defaultReducers } from "./SyncDb"
+import {
+	Commit,
+	IClientSyncDb,
+	ISyncCache,
+	JSONValue,
+	Op,
+	PendingCommit,
+	Pubsub,
+	ReducerMap,
+	SubscribeResult,
+	SyncApi,
+} from "./types"
 
 export class SyncCache implements ISyncCache {
-	cache: ITupleCache
+	cache: TupleCache
 	api: SyncApi
 	pubsub: Pubsub
 	// We cache ClientSyncDb instances to share state (like pending commits/clock) for the same prefix.
@@ -17,7 +28,7 @@ export class SyncCache implements ISyncCache {
 	constructor(args: { api: SyncApi; pubsub: Pubsub }) {
 		this.api = args.api
 		this.pubsub = args.pubsub
-		this.cache = new TupleCache(new Cache(codec.compare))
+		this.cache = new TupleCache(new OkvCache(codec.compare))
 	}
 
 	syncDb<R extends ReducerMap>(prefix: Tuple, reducers: R): ClientSyncDb<R> {
@@ -36,15 +47,15 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 	pendingCommits: PendingCommit<R>[] = []
 	syncedClock: number = 0
 
-	cache: ITupleCache
-	dataCache: ITupleCache
+	cache: TupleCache
+	dataCache: TupleCache
 
 	constructor(
 		public syncCache: SyncCache,
 		public prefix: Tuple,
 		public reducers: R
 	) {
-		this.cache = (syncCache.cache as ITupleCache).subspace(prefix)
+		this.cache = (syncCache.cache as TupleCache).subspace(prefix)
 		this.dataCache = this.cache.subspace(["data"])
 
 		const clock = this.cache.listRaw({ gte: ["clock"], lte: ["clock"] })[0]?.value
@@ -64,19 +75,29 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 			list: (args) => this.dataCache.listRaw(args),
 			get: (key) => this.dataCache.listRaw({ gte: key, lte: key })[0]?.value,
 			has: (key) => this.dataCache.listRaw({ gte: key, lte: key }).length > 0,
-			write: () => { throw new Error("Write via user.write()") }, // Read-only
-			subspace: (p) => { throw new Error("Subspace not fully implemented on ClientSyncDb data") } // TODO
+			write: () => {
+				throw new Error("Write via user.write()")
+			}, // Read-only
+			subspace: (p) => {
+				throw new Error("Subspace not fully implemented on ClientSyncDb data")
+			}, // TODO
 		} as any)
 
 		return {
 			...db,
-			subscribe: (args: ListArgs<Tuple>, listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void): SubscribeResult => {
+			subscribe: (
+				args: ListArgs<Tuple>,
+				listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void
+			): SubscribeResult => {
 				return self.subscribeData(args, listener)
-			}
+			},
 		}
 	}
 
-	private subscribeData(args: ListArgs<Tuple>, listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void): SubscribeResult {
+	private subscribeData(
+		args: ListArgs<Tuple>,
+		listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void
+	): SubscribeResult {
 		// 1. Local Cache Subscription
 		const cacheUnsub = this.dataCache.subscribe(cachedRange(args, []), () => {
 			const res = this.dataCache.list(args)
@@ -89,7 +110,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		// NOTE: In a real app we might want to ref-count this subscription so we don't sync multiple times.
 		// For now, each subscription triggers its own sync logic or we rely on the shared session state.
 		// Ideally, the Session should manage the clock subscription.
-		
+
 		// Let's attach a listener to the session that triggers sync.
 		const pubsubUnsub = this.syncCache.pubsub.onMessage((tuple, value) => {
 			// Check if it matches our clock tuple
@@ -101,7 +122,6 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		})
 		this.syncCache.pubsub.subscribe(clockTuple)
 
-
 		// 3. Initial Remote Fetch
 		const remote = this.fetchAndApply(args).then((data) => {
 			return data
@@ -109,7 +129,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 
 		// 4. Initial Local Result
 		const initialRes = this.dataCache.list(args)
-		
+
 		return {
 			local: initialRes,
 			remote,
@@ -117,7 +137,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 				cacheUnsub()
 				pubsubUnsub()
 				// Maybe unsubscribe from pubsub topic if no more listeners?
-			}
+			},
 		}
 	}
 
@@ -126,19 +146,18 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 			// Determine range relative to dataPrefix
 			// The API read expects "scope" (prefix) and "range" (relative args)
 			const res = await this.syncCache.api.read(this.prefix, args, this.syncedClock)
-			
+
 			this.handleSyncResponse(res.clock, res.updates)
-			
+
 			// Insert the data snapshot into cache
 			this.dataCache.insert(args, res.data)
-			
+
 			return res.data
 		} catch (e) {
 			console.error("Fetch failed", e)
 			throw e
 		}
 	}
-
 
 	// ==========================================================================
 	// History API
@@ -147,7 +166,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 	get history() {
 		// Similar to data but for history subspace
 		const historyCache = this.cache.subspace(["history"])
-		
+
 		// TODO: Implement read-only DB wrapper for history
 		// For now just enough for tests/usage
 		return {
@@ -156,7 +175,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 			},
 			subscribe: () => {
 				// TODO: Implement subscription for history
-			}
+			},
 		}
 	}
 
@@ -166,10 +185,9 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 
 	get pending() {
 		return {
-			list: () => this.pendingCommits.map(p => ({ ...p.commit }))
+			list: () => this.pendingCommits.map((p) => ({ ...p.commit })),
 		}
 	}
-
 
 	// ==========================================================================
 	// Write API
@@ -183,9 +201,15 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		}
 
 		const ops: Op<R>[] = []
-		const proxy = new Proxy({}, {
-			get: (_, fn) => (...args: any[]) => ops.push({ fn: fn as string as keyof R & string, args: args as any })
-		})
+		const proxy = new Proxy(
+			{},
+			{
+				get:
+					(_, fn) =>
+					(...args: any[]) =>
+						ops.push({ fn: fn as string as keyof R & string, args: args as any }),
+			}
+		)
 		build!(proxy)
 
 		this.dispatch(meta, ops)
@@ -199,13 +223,13 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 			commitedAt: now,
 			createdAt: now,
 			ops,
-			...meta
+			...meta,
 		}
 
 		// Apply optimistically
 		// Writes are relative to the session prefix
 		const writes: WriteArgs<Tuple, JSONValue> = { set: [], delete: [] }
-		
+
 		// Create a proxy tx that writes to `writes` array
 		// It acts on `["data"]`
 		const proxyTx = this.createProxyTx(writes)
@@ -213,7 +237,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		for (const op of ops) {
 			const reducer = this.reducers[op.fn as string] || (defaultReducers as any)[op.fn as string]
 			if (!reducer) throw new Error(`Unknown reducer: ${op.fn as string}`)
-			
+
 			reducer(proxyTx, ...op.args)
 		}
 
@@ -222,7 +246,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		this.pendingCommits.push({
 			commit,
 			cleanup,
-			changes: writes
+			changes: writes,
 		})
 
 		this.sync()
@@ -239,11 +263,13 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 				writes.delete?.push([...fullPrefix, ...key])
 			},
 			write: (args) => {
-				args.set?.forEach(({ key, value }) => writes.set?.push({ key: [...fullPrefix, ...key], value }))
+				args.set?.forEach(({ key, value }) =>
+					writes.set?.push({ key: [...fullPrefix, ...key], value })
+				)
 				args.delete?.forEach((key) => writes.delete?.push([...fullPrefix, ...key]))
 			},
 			get: (key) => {
-				// Optimistic get from cache? 
+				// Optimistic get from cache?
 				const fullKey = [...fullPrefix, ...key]
 				// We need to read from the session cache
 				const res = this.cache.listRaw({ gte: fullKey, lte: fullKey })
@@ -257,7 +283,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 				return this.cache.listRaw({ gte: fullKey, lte: fullKey }).length > 0
 			},
 			commit: () => {},
-			committed: false
+			committed: false,
 		} as unknown as TupleTx
 	}
 
@@ -272,20 +298,20 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 
 		try {
 			while (true) {
-				const commitsToSend = this.pendingCommits.map(p => p.commit)
-				
+				const commitsToSend = this.pendingCommits.map((p) => p.commit)
+
 				const res = await this.syncCache.api.sync(
 					this.prefix,
-					commitsToSend as unknown as Commit[], 
+					commitsToSend as unknown as Commit[],
 					this.syncedClock
 				)
 
 				this.handleSyncResponse(res.clock, res.updates)
 
-				const confirmedIds = new Set(res.updates.map(u => u.id).filter(Boolean))
-				
-				const remaining = this.pendingCommits.filter(p => !confirmedIds.has(p.commit.id))
-				
+				const confirmedIds = new Set(res.updates.map((u) => u.id).filter(Boolean))
+
+				const remaining = this.pendingCommits.filter((p) => !confirmedIds.has(p.commit.id))
+
 				this.pendingCommits = []
 				for (const p of remaining) {
 					this.reapplyPending(p)
@@ -301,7 +327,6 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 					break
 				}
 			}
-
 		} catch (e) {
 			console.error("Sync failed", e)
 		} finally {
@@ -346,7 +371,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		// Re-run reducer
 		const writes: WriteArgs<Tuple, JSONValue> = { set: [], delete: [] }
 		const proxyTx = this.createProxyTx(writes)
-		
+
 		for (const op of p.commit.ops) {
 			const reducer = this.reducers[op.fn] || (defaultReducers as any)[op.fn]
 			if (reducer) {
@@ -358,7 +383,7 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		this.pendingCommits.push({
 			commit: p.commit,
 			cleanup,
-			changes: writes
+			changes: writes,
 		})
 	}
 }

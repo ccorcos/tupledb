@@ -1,16 +1,26 @@
 import {
+	EncodeSubspaceListArgs,
 	KeyDecodeCacheListResult,
 	KeyEncodeList,
 	KeyEncodeListArgs,
 	KeyEncodeWrite,
-	EncodeSubspaceListArgs,
 	TupleSubspaceEncoder,
 } from "./Encoder"
 import { Range } from "./Range"
-import { ListArgs, OkvCache, WriteArgs, Tuple, JSONValue, ITupleCache } from "./types"
+import {
+	JSONValue,
+	ListArgs,
+	OkvCache,
+	Tuple,
+	TupleCache as TupleCacheApi,
+	WriteArgs,
+} from "./types"
 
-export class TupleCache implements ITupleCache {
-	constructor(public cache: OkvCache<Tuple, JSONValue>, public prefix: Tuple = []) {}
+export class TupleCache implements TupleCacheApi {
+	constructor(
+		public cache: OkvCache<Tuple, JSONValue>,
+		public prefix: Tuple = []
+	) {}
 
 	subspace(prefix: Tuple) {
 		return new TupleCache(this.cache, [...this.prefix, ...prefix])
