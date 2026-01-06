@@ -55,8 +55,9 @@ export type SyncDb<R extends ReducerMap> = {
 // SyncDbClient Types
 // ==========================================================================
 
-export interface ISyncCache {
+export interface ISyncClient<GlobalReducers extends ReducerMap> {
 	syncDb<R extends ReducerMap>(prefix: Tuple, reducers: R): IClientSyncDb<R>
+	write(meta: CommitMeta, build: (ops: OpsBuilder<GlobalReducers>) => void): void
 }
 
 export interface IClientSyncDb<R extends ReducerMap> {
@@ -70,14 +71,9 @@ export interface IClientSyncDb<R extends ReducerMap> {
 	history: {
 		list: (args?: ListArgs<Tuple>) => { key: Tuple; value: any }[]
 	}
-	pending: {
-		list: () => Commit<R>[]
-	}
-	write: {
-		(commit: CommitArgs<R> | Commit<R>): void
-		(meta: CommitMeta, build: (ops: OpsBuilder<R>) => void): void
-		(build: (ops: OpsBuilder<R>) => void): void
-	}
+	// Write is now typically handled via the global client.write,
+	// but we might keep a convenience method or remove it.
+	// For this refactor, we focus on the global path.
 	sync: () => Promise<void>
 }
 

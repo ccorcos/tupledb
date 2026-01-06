@@ -1,73 +1,219 @@
 import { randomId } from "../shared/randomId"
 import { codec } from "../tupleDb/Codec"
-import { OkvCache, cachedRange, writeToInsert } from "../tupleDb/OkvCache"
+import { OkvCache, cachedRange } from "../tupleDb/OkvCache"
 import { TupleCache } from "../tupleDb/TupleCache"
 import { readOnlyTupleDb } from "../tupleDb/TupleDb"
 import { ListArgs, Tuple, TupleTx, WriteArgs } from "../tupleDb/types"
 import { defaultReducers } from "./SyncDb"
 import {
 	Commit,
+	CommitMeta,
 	IClientSyncDb,
-	ISyncCache,
+	ISyncClient,
 	JSONValue,
-	Op,
-	PendingCommit,
+	OpsBuilder,
 	Pubsub,
 	ReducerMap,
 	SubscribeResult,
 	SyncApi,
 } from "./types"
 
-export class SyncCache implements ISyncCache {
+export class SyncClient<GlobalReducers extends ReducerMap> implements ISyncClient<GlobalReducers> {
 	cache: TupleCache
 	api: SyncApi
 	pubsub: Pubsub
-	// We cache ClientSyncDb instances to share state (like pending commits/clock) for the same prefix.
-	sessions = new Map<string, ClientSyncDb<any>>()
+	reducers: GlobalReducers
 
-	constructor(args: { api: SyncApi; pubsub: Pubsub }) {
+	// Pending global commits to be sent to the server
+	pendingCommits: Commit[] = []
+
+	// Map of prefix (JSON) -> Session State
+	sessions = new Map<string, SessionState>()
+
+	constructor(args: { api: SyncApi; pubsub: Pubsub; reducers: GlobalReducers }) {
 		this.api = args.api
 		this.pubsub = args.pubsub
+		this.reducers = args.reducers
 		this.cache = new TupleCache(new OkvCache(codec.compare))
 	}
 
-	syncDb<R extends ReducerMap>(prefix: Tuple, reducers: R): ClientSyncDb<R> {
+	// ==========================================================================
+	// Global Write
+	// ==========================================================================
+
+	write(meta: CommitMeta, build: (ops: OpsBuilder<GlobalReducers>) => void) {
+		const ops: any[] = []
+		const proxy = new Proxy(
+			{},
+			{
+				get:
+					(_, fn) =>
+					(...args: any[]) =>
+						ops.push({ fn: fn as string, args }),
+			}
+		)
+		build(proxy)
+
+		const now = new Date().toISOString()
+		const commit: Commit = {
+			id: randomId(),
+			clock: 0, // Global path is "shallow", doesn't need strict ordering/clocking on client
+			commitedAt: now,
+			createdAt: now,
+			ops,
+			...meta,
+		}
+
+		// Optimistic Apply
+		// We need to capture all writes to subspaces
+		const changes: WriteArgs<Tuple, JSONValue> = { set: [], delete: [] }
+		const tx = this.createCaptureTx(changes)
+
+		// Run reducers
+		for (const op of ops) {
+			const reducer = this.reducers[op.fn]
+			if (!reducer) throw new Error(`Unknown reducer: ${op.fn}`)
+			// We pass the tx. The reducer can call tx.subspace(...).
+			// Then it might use syncDb(subspace).write(...)
+			reducer(tx, ...op.args)
+		}
+
+		// Apply changes to cache
+		const cleanup = this.cache.write(changes)
+
+		// Queue commit
+		this.pendingCommits.push(commit)
+
+		// Trigger sync (fire and forget)
+		this.sync()
+	}
+
+	private createCaptureTx(writes: WriteArgs<Tuple, JSONValue>, prefix: Tuple = []): any {
+		// We mimic a TupleTx but we intercept writes.
+		// We also need to allow reading from the cache + current writes (ideally).
+		// For now, reading from cache is enough for most optimistic cases.
+		const self = this
+		const tx: Partial<TupleTx> = {
+			compare: self.cache.compare,
+			subspace: (p: Tuple) => self.createCaptureTx(writes, [...prefix, ...p]),
+			set: (key: Tuple, value: JSONValue) => {
+				writes.set?.push({ key: [...prefix, ...key], value })
+			},
+			delete: (key: Tuple) => {
+				writes.delete?.push([...prefix, ...key])
+			},
+			get: (key: Tuple) => {
+				const fullKey = [...prefix, ...key]
+				// TODO: check 'writes' for dirty read?
+				const res = self.cache.list({ gte: fullKey, lte: fullKey })
+				return res.hit?.[0]?.value
+			},
+			list: (args: ListArgs<Tuple> = {}) => {
+				const fullArgs = { ...args }
+				if (fullArgs.gte) fullArgs.gte = [...prefix, ...fullArgs.gte]
+				if (fullArgs.lte) fullArgs.lte = [...prefix, ...fullArgs.lte]
+				if (fullArgs.gt) fullArgs.gt = [...prefix, ...fullArgs.gt]
+				if (fullArgs.lt) fullArgs.lt = [...prefix, ...fullArgs.lt]
+
+				// We don't handle reverse/limit perfectly here relative to prefix if it spans,
+				// but for single subspace operations it should be fine.
+				const res = self.cache.list(fullArgs)
+				return (res.hit || []).map((item) => ({
+					key: item.key.slice(prefix.length),
+					value: item.value,
+				}))
+			},
+			write: (args: WriteArgs<Tuple, JSONValue>) => {
+				args.set?.forEach(({ key, value }) => {
+					writes.set?.push({ key: [...prefix, ...key], value })
+				})
+				args.delete?.forEach((key) => {
+					writes.delete?.push([...prefix, ...key])
+				})
+			},
+			// Helper for SyncDb factory usage
+			commit: () => {}, // No-op, we capture writes
+		}
+
+		// We need to match TupleTx shape enough for syncDb/reducers
+		return tx as TupleTx
+	}
+
+	// ==========================================================================
+	// Sync Logic
+	// ==========================================================================
+
+	isSyncing = false
+	async sync() {
+		if (this.isSyncing) return
+		this.isSyncing = true
+
+		try {
+			// Flush pending global commits
+			// We assume the server endpoint for global writes is root []
+			// or a specific global endpoint.
+			// The current SyncApi.sync takes a scope.
+			// We'll use [] as global scope.
+
+			while (this.pendingCommits.length > 0) {
+				const batch = [...this.pendingCommits]
+				// Send to server
+				// Note: existing sync() api returns updates.
+				// For global write, we might get updates for ANY subspace.
+				// But SyncApi.sync implies scoping.
+				// We might need a generic "push" api.
+				// For now, let's assume sync([]) handles global.
+
+				const res = await this.api.sync([], batch, 0)
+
+				// Success (assumed). Remove from pending.
+				// Note: if server fails, we retry.
+				this.pendingCommits = this.pendingCommits.filter((c) => !batch.includes(c))
+
+				// We might get updates back. If so, handle them.
+				// Global sync response might contain updates for subspaces?
+				// If the server fans out, it might just return "OK".
+				// The updates will come via pubsub/subscription to specific DBs.
+			}
+		} catch (e) {
+			console.error("Global Sync failed", e)
+		} finally {
+			this.isSyncing = false
+		}
+	}
+
+	// ==========================================================================
+	// Subspace / Session
+	// ==========================================================================
+
+	syncDb<R extends ReducerMap>(prefix: Tuple, reducers: R): IClientSyncDb<R> {
 		const key = JSON.stringify(prefix)
 		if (!this.sessions.has(key)) {
-			this.sessions.set(key, new ClientSyncDb(this, prefix, reducers))
+			this.sessions.set(key, new SessionState(this, prefix, reducers))
 		}
-		const session = this.sessions.get(key)!
-		// If reducers changed, update them? Ideally they shouldn't change for the same prefix.
-		// For now assume they are consistent.
-		return session
+		return this.sessions.get(key)! as unknown as IClientSyncDb<R>
 	}
 }
 
-export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
-	pendingCommits: PendingCommit<R>[] = []
-	syncedClock: number = 0
-
+class SessionState<R extends ReducerMap> implements IClientSyncDb<R> {
 	cache: TupleCache
 	dataCache: TupleCache
+	syncedClock = 0
 
 	constructor(
-		public syncCache: SyncCache,
+		public client: SyncClient<any>,
 		public prefix: Tuple,
 		public reducers: R
 	) {
-		this.cache = (syncCache.cache as TupleCache).subspace(prefix)
+		this.cache = client.cache.subspace(prefix)
 		this.dataCache = this.cache.subspace(["data"])
 
+		// Initialize clock from cache
 		const clockRes = this.cache.list({ gte: ["clock"], lte: ["clock"] })
-		const clock = clockRes.hit?.[0]?.value
-		this.syncedClock = (clock as number) || 0
+		this.syncedClock = (clockRes.hit?.[0]?.value as number) || 0
 	}
 
 	clock = () => this.syncedClock
-
-	// ==========================================================================
-	// Data API
-	// ==========================================================================
 
 	get data() {
 		const self = this
@@ -76,12 +222,9 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 			list: (args) => this.dataCache.list(args).hit || [],
 			get: (key) => this.dataCache.list({ gte: key, lte: key }).hit?.[0]?.value,
 			has: (key) => (this.dataCache.list({ gte: key, lte: key }).hit?.length || 0) > 0,
-			write: () => {
-				throw new Error("Write via user.write()")
-			}, // Read-only
 			subspace: (p) => {
 				throw new Error("Subspace not fully implemented on ClientSyncDb data")
-			}, // TODO
+			},
 		} as any)
 
 		return {
@@ -95,40 +238,56 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 		}
 	}
 
+	get history() {
+		const historyCache = this.cache.subspace(["history"])
+		return {
+			list: (args: ListArgs<Tuple> = {}) => {
+				return historyCache.list(args).hit || []
+			},
+		}
+	}
+
+	sync = async () => {
+		// Fetch updates for this subspace
+		try {
+			const res = await this.client.api.fetch(this.prefix, this.syncedClock)
+			this.handleUpdates(res.clock, res.updates)
+		} catch (e) {
+			console.error("Fetch failed", e)
+		}
+	}
+
+	private async fetchAndApply(args: ListArgs<Tuple>) {
+		try {
+			const res = await this.client.api.read(this.prefix, args, this.syncedClock)
+			this.handleUpdates(res.clock, res.updates)
+			this.dataCache.insert([{ args, result: res.data }])
+			return res.data
+		} catch (e) {
+			console.error("Fetch failed", e)
+			throw e
+		}
+	}
+
 	private subscribeData(
 		args: ListArgs<Tuple>,
 		listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void
 	): SubscribeResult {
-		// 1. Local Cache Subscription
 		const cacheUnsub = this.dataCache.subscribe(cachedRange(args, []), () => {
 			const res = this.dataCache.list(args)
 			listener(res)
 		})
 
-		// 2. PubSub Subscription (Clock)
 		const clockTuple = [...this.prefix, "clock"]
-		// We subscribe to the clock. When it changes, we fetch updates.
-		// NOTE: In a real app we might want to ref-count this subscription so we don't sync multiple times.
-		// For now, each subscription triggers its own sync logic or we rely on the shared session state.
-		// Ideally, the Session should manage the clock subscription.
-
-		// Let's attach a listener to the session that triggers sync.
-		const pubsubUnsub = this.syncCache.pubsub.onMessage((tuple, value) => {
-			// Check if it matches our clock tuple
+		const pubsubUnsub = this.client.pubsub.onMessage((tuple, value) => {
 			if (codec.compare(tuple, clockTuple) === 0) {
-				// New clock available.
-				// Trigger sync.
 				this.sync()
 			}
 		})
-		this.syncCache.pubsub.subscribe(clockTuple)
+		this.client.pubsub.subscribe(clockTuple)
 
-		// 3. Initial Remote Fetch
-		const remote = this.fetchAndApply(args).then((data) => {
-			return data
-		})
+		const remote = this.fetchAndApply(args)
 
-		// 4. Initial Local Result
 		const initialRes = this.dataCache.list(args)
 
 		return {
@@ -137,123 +296,41 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 			unsubscribe: () => {
 				cacheUnsub()
 				pubsubUnsub()
-				// Maybe unsubscribe from pubsub topic if no more listeners?
 			},
 		}
 	}
 
-	private async fetchAndApply(args: ListArgs<Tuple>) {
-		try {
-			// Determine range relative to dataPrefix
-			// The API read expects "scope" (prefix) and "range" (relative args)
-			const res = await this.syncCache.api.read(this.prefix, args, this.syncedClock)
+	private handleUpdates(serverClock: number, updates: Commit[]) {
+		this.syncedClock = serverClock
+		// We insert the new clock and the history/data
+		// Note: The server sends 'updates' which are Commits.
+		// We need to apply them to the cache.
+		// BUT we might have already applied them optimistically via Global Write!
+		// If so, we are just "confirming" them.
+		// However, the Commit ID might be different if the server regenerated it?
+		// Or if the server generated the Local Commit from the Global Commit.
+		// Ideally, we just re-apply. Idempotency is key.
 
-			this.handleSyncResponse(res.clock, res.updates)
-
-			// Insert the data snapshot into cache
-			this.dataCache.insert([{ args, result: res.data }])
-
-			return res.data
-		} catch (e) {
-			console.error("Fetch failed", e)
-			throw e
-		}
-	}
-
-	// ==========================================================================
-	// History API
-	// ==========================================================================
-
-	get history() {
-		// Similar to data but for history subspace
-		const historyCache = this.cache.subspace(["history"])
-
-		// TODO: Implement read-only DB wrapper for history
-		// For now just enough for tests/usage
-		return {
-			list: (args: ListArgs<Tuple> = {}) => {
-				return historyCache.list(args).hit || []
-			},
-			subscribe: () => {
-				// TODO: Implement subscription for history
-			},
-		}
-	}
-
-	// ==========================================================================
-	// Pending API
-	// ==========================================================================
-
-	get pending() {
-		return {
-			list: () => this.pendingCommits.map((p) => ({ ...p.commit })),
-		}
-	}
-
-	// ==========================================================================
-	// Write API
-	// ==========================================================================
-
-	write(meta: any, build?: (ops: any) => void) {
-		if (build === undefined) {
-			// Overload: write(build)
-			build = meta
-			meta = {}
-		}
-
-		const ops: Op<R>[] = []
-		const proxy = new Proxy(
-			{},
-			{
-				get:
-					(_, fn) =>
-					(...args: any[]) =>
-						ops.push({ fn: fn as string as keyof R & string, args: args as any }),
-			}
-		)
-		build!(proxy)
-
-		this.dispatch(meta, ops)
-	}
-
-	private dispatch(meta: any, ops: Op<R>[]) {
-		const now = new Date().toISOString()
-		const commit: Commit<R> = {
-			id: randomId(),
-			clock: 0, // Placeholder
-			commitedAt: now,
-			createdAt: now,
-			ops,
-			...meta,
-		}
-
-		// Apply optimistically
-		// Writes are relative to the session prefix
 		const writes: WriteArgs<Tuple, JSONValue> = { set: [], delete: [] }
+		writes.set!.push({ key: ["clock"], value: this.syncedClock })
 
-		// Create a proxy tx that writes to `writes` array
-		// It acts on `["data"]`
-		const proxyTx = this.createProxyTx(writes)
+		for (const commit of updates) {
+			writes.set!.push({ key: ["history", commit.clock], value: commit })
 
-		for (const op of ops) {
-			const reducer = this.reducers[op.fn as string] || (defaultReducers as any)[op.fn as string]
-			if (!reducer) throw new Error(`Unknown reducer: ${op.fn as string}`)
-
-			reducer(proxyTx, ...op.args)
+			const proxyTx = this.createProxyTx(writes)
+			for (const op of commit.ops) {
+				const reducer = this.reducers[op.fn] || (defaultReducers as any)[op.fn]
+				if (reducer) {
+					reducer(proxyTx, ...op.args)
+				}
+			}
 		}
 
-		const cleanup = this.cache.write(writes)
-
-		this.pendingCommits.push({
-			commit,
-			cleanup,
-			changes: writes,
-		})
-
-		this.sync()
+		this.cache.write(writes)
 	}
 
 	private createProxyTx(writes: WriteArgs<Tuple, JSONValue>, scope: Tuple = []): TupleTx {
+		// Similar to existing logic, applies to "data" subspace
 		const fullPrefix = ["data", ...scope]
 		return {
 			compare: this.cache.compare,
@@ -263,128 +340,21 @@ export class ClientSyncDb<R extends ReducerMap> implements IClientSyncDb<R> {
 			delete: (key: Tuple) => {
 				writes.delete?.push([...fullPrefix, ...key])
 			},
-			write: (args) => {
-				args.set?.forEach(({ key, value }) =>
-					writes.set?.push({ key: [...fullPrefix, ...key], value })
-				)
-				args.delete?.forEach((key) => writes.delete?.push([...fullPrefix, ...key]))
-			},
 			get: (key) => {
-				// Optimistic get from cache?
+				// Optimistic get from cache
 				const fullKey = [...fullPrefix, ...key]
-				// We need to read from the session cache
-				const res = this.cache.list({ gte: fullKey, lte: fullKey })
-				return res.hit?.[0]?.value
+				return this.cache.list({ gte: fullKey, lte: fullKey }).hit?.[0]?.value
 			},
-			list: () => [], // Not supported in reducer usually
 			subspace: (p) => this.createProxyTx(writes, [...scope, ...p]),
-			// Other methods...
+			// ... other methods stubbed
 			has: (key) => {
 				const fullKey = [...fullPrefix, ...key]
 				return (this.cache.list({ gte: fullKey, lte: fullKey }).hit?.length || 0) > 0
 			},
 			commit: () => {},
+			write: () => {},
+			list: () => [],
 			committed: false,
 		} as unknown as TupleTx
-	}
-
-	// ==========================================================================
-	// Sync Logic
-	// ==========================================================================
-
-	isSyncing = false
-	async sync() {
-		if (this.isSyncing) return
-		this.isSyncing = true
-
-		try {
-			while (true) {
-				const commitsToSend = this.pendingCommits.map((p) => p.commit)
-
-				const res = await this.syncCache.api.sync(
-					this.prefix,
-					commitsToSend as unknown as Commit[],
-					this.syncedClock
-				)
-
-				this.handleSyncResponse(res.clock, res.updates)
-
-				const confirmedIds = new Set(res.updates.map((u) => u.id).filter(Boolean))
-
-				const remaining = this.pendingCommits.filter((p) => !confirmedIds.has(p.commit.id))
-
-				this.pendingCommits = []
-				for (const p of remaining) {
-					this.reapplyPending(p)
-				}
-
-				if (remaining.length === commitsToSend.length && commitsToSend.length > 0) {
-					break
-				}
-				if (commitsToSend.length === 0 && res.updates.length === 0) {
-					break
-				}
-				if (this.pendingCommits.length === 0 && res.updates.length === 0) {
-					break
-				}
-			}
-		} catch (e) {
-			console.error("Sync failed", e)
-		} finally {
-			this.isSyncing = false
-		}
-	}
-
-	private handleSyncResponse(serverClock: number, updates: Commit[]) {
-		// 1. Cleanup ALL pending commits (optimistic)
-		for (const p of this.pendingCommits) {
-			p.cleanup()
-		}
-
-		this.syncedClock = serverClock
-		// Update clock in cache
-		this.cache.insert(writeToInsert({ set: [{ key: ["clock"], value: this.syncedClock }] }))
-
-		// 2. Apply Server Updates
-		for (const commit of updates) {
-			this.applyServerUpdate(commit)
-		}
-	}
-
-	private applyServerUpdate(commit: Commit) {
-		const writes: WriteArgs<Tuple, JSONValue> = { set: [], delete: [] }
-		const proxyTx = this.createProxyTx(writes)
-
-		for (const op of commit.ops) {
-			const reducer = this.reducers[op.fn] || (defaultReducers as any)[op.fn]
-			if (reducer) {
-				reducer(proxyTx, ...op.args)
-			}
-		}
-
-		// Also record history
-		writes.set!.push({ key: ["history", commit.clock], value: commit })
-
-		this.cache.insert(writeToInsert(writes))
-	}
-
-	private reapplyPending(p: PendingCommit<R>) {
-		// Re-run reducer
-		const writes: WriteArgs<Tuple, JSONValue> = { set: [], delete: [] }
-		const proxyTx = this.createProxyTx(writes)
-
-		for (const op of p.commit.ops) {
-			const reducer = this.reducers[op.fn] || (defaultReducers as any)[op.fn]
-			if (reducer) {
-				reducer(proxyTx, ...op.args)
-			}
-		}
-
-		const cleanup = this.cache.write(writes)
-		this.pendingCommits.push({
-			commit: p.commit,
-			cleanup,
-			changes: writes,
-		})
 	}
 }

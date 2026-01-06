@@ -17,21 +17,110 @@ Gemini.md...
 
 ---
 
-OkvCacheApi
-TupleCacheApi
+You definitely need the fanout though. The clients don't have all the data, or permission.
+* Fanning out a message to send is a perfect example. We need this top-level idea.
+* Writing to two Notion blocks transactionally so that pointers line up is a different but relevant example.
+
+on the backend...
+
+function sendMessage() {
+	for (person of msg.to)
+		syncDb(tx.subspace(person)).addToInbox(msg)
+}
+
+each syncdb gets its own history there. but it isnt explicily pending...
+
+on the frontend.
+
+function sendMessage() {
+	for (person of msg.to)
+		tx.syncDb(person).addToInbox(msg)
+}
+
+This actually has the capability of tracking global transactions that are fanned out into local histories.
+
+The tricky question though... whether global or local
+
+https://chatgpt.com/c/695816b9-c750-8325-927e-e0e829507d38
+
+Operations must be...
 
 
-TupleDbCache is the unifying abstraction that combines {api, pubsub, tupleCache}
+TODO: keep going here.
+- simple solution -- all writes must be contained to the same syncdb. that's the simple and isolated approach
+- how to extend that to work across multiple syncdbs?
+	- fanout writes to different users.
+	- transactionsally move pointers for two blocks
+- how do we have to constrain write ops so that this is eventually consistent?
+	- no read, only write
+	- read must be guaranteed. read if exists and overwrite if exists. this doesnt work for creating new blocks though.
+		- suppose I want to move a page from one place to another place. needs to be able to optimistically update
+		- i need to be able to create a new record from scratch optimistically. x
+
+Lets take a step back and think more pragmatically.
+- the app has commit operations. its global
+
+Two very different ways of doing things...
+- a user gets a single syncdb in its entirety, writes fan out to each user, each user gets a single history. writing to their history triggers writes in other users on the backend. history for a single document requires indexing the history.
+- a user gets a bunch of syncdb for different records. a contacts app feels more this way, where you sync with each individual peer to get their latest information. a more complex case is nested docs like Notion. Making a coordinated change between multiple documents at once.
+
+the path forward...
+- lets just start with one. a user gets an entire space and we fan out.
+	example: todomvc
+	multiple records.
+- then lets have a few...
+	example: chat app.
+		user contacts / profiles
+		chatrooms
+- lets not worry about the coordinated write until we really need it... and honestly, we should probably just avoid it.
+
+
+
+Version 1
+- on the backend, each user gets a subspace syncdb.
+- reducers for sending messages, etc.
+- backend will fan out to each user subspace.
+- clients sync that one user's subspace.
+- inbox, outbox, to, from, reply.
+- you can add properties and filters too if you want.
+
+Version 2
+- chatrooms, each room gets a subspace syncdb
+- each user gets a profile syncdb
+- clients with sync with each of the things they need
+- creating a new chatroom will touch two syncdbs (1) the user channel list and (2) the new chatroom.
+	- we need a path for the operations which identifies which syncdb. those operations all live together and commit transactionally.
+	- as for the actual history, the histories don't actually know about each other. they're isolated.
+
+
+brainstorm an example. methodically.
 
 
 
 
 
-It seems like IClientSyncDb, this should be a type...
+
+
+
+
+
+
+IClientSyncDb
 
 data: ReadOnlyTupleDb & {
 	subscribe: (args: ListArgs<Tuple>, listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void) => SubscribeResult
 }
+
+
+
+
+OkvCacheApi
+TupleCacheApi
+
+
+It seems like IClientSyncDb, this should be a type...
+
+
 
 
 ClientSyncDb is {api, pubsub, cache} all in one. TupleCache doesnt handle fetching or reference reference counting and subscriptions.

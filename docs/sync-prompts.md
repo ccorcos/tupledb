@@ -512,3 +512,60 @@ src
     └── types.ts
 
 ---
+
+
+
+We need to think about where the "operation" write types live...
+- on one hand, it lives in the sync history for each object.
+- on the other hand, there should be just a single write api from the client which fans out to the various sync dbs.
+
+It seems like we should have a global syncDb with syncDbs inside. The global syncDb can be "shallow" in the sense that it doesn't need to keep a clock or history or publish clocks to pubsub. It's just an abstraction for the write path which fans out to the inner syncDbs which are not shallow.
+
+Then inside SyncClient.ts... SyncCache is a unification of {api, pubsub, cache, reducers}. It manages all the state, pending writes, what needs to get synced with the server, what syncdbs we're listening to and when to purge them from the cache. I don't like how ClientSyncDb contains so much state. It shouldn't have any state and instead the state is held by SyncCache.
+
+I'm imagining two different places where sync db abstraction is used in the client. When we're syncing changes from the server, we're receiving just the changes for each syncdb and we'll want to apply those to the local sync dbs. However, the client shouldn't be commiting writes to the indicidual syncdbs -- those should generally be readonly, and the client should be commiting writes to the global syncdb so that the server can fanout those writes appropriately (as well as optimistically fan them out locally).
+
+This feels like the right way of doing things.
+
+const client = new SyncClient({api, pubsub, cache, reducers})
+client.write({authorId: "1234"}, ops => ops.doGlobalWrite())
+
+For optimistic updates, the reducers will map into the relevant syncDbs...
+
+const reducers = {
+	doGlobalWrite(tx, args) {
+		const thing = syncDb(tx.subspace([whatever]))
+		things.write(ops => ops.doLocalWrite())
+	}
+}
+
+There's some tricky stuff to figure out here though.
+- that's an optimistic pending write, not an actual write. the metadata should reflect this, and for a specific syncDb, we should see pending writes just for that syncDb scope.
+- we also need to handle the case where the data we're fetching as part of a read-write operation, need to make sure that the data is actually in the cache. If the data is not in the cache, then the operation may thing that the data does not exist which could change the behavior, especially if its an upsert. And so if we read outside the range that exists in the cache, we probably want to avoid doing that optimistic write, though we still want ot see the operation as pending...
+
+As for the server side, things are a bit more straightforward. We get operations for the global reducers, apply them, and then publish all the clock updates.
+
+---
+
+
+I want to brainstorm two examples, end to end, using tupledb, syncdb, and eventually recorddb too.
+
+Create SyncExample1.test.ts and SyncExample2.test.ts to demonstrate these ideas. Include detailed comments about how each example works and its intended architecture so that future iterations can stay true to the purpose.
+
+Example 1: A chat app where users get their own subspaces and everything fans out entirely on the backend. There's only one syncdb on the client. Client submits operations on the syncdb, the server applies those operations and fans out to all the users. Users are only subscribed to a single user syncDb subspace so there's only one clock to listen to there.
+Example 2: A chat app where each chatroom gets their own syncdb as well as a user syncDb for managing user information and lists of chatrooms, etc. In this case, the client submit operations on the different syncDb can can transactionally commit operations across multiple syncDbs at once. The server gets those operations and applied them as you'd expect. Clients end up subscribing to more than one syncDb clock.
+
+We don't need to actually build a UI or an http server, but we should model the client and server as if there was a network in between which could error, and reactivity in the client suitable for rendering updates in realtime.
+
+Make sure you architect things succintly and deliberately in the types.ts files so we have well defined abstractions and interfaces.
+
+We can start by modeling operations as a very simple set or delete operation to upsert or delete an object. Lets focus on only three object types, users, messages, and user profiles.
+
+In example 1, when a user profile is edited, it will fan out to any users who have correspondence with them. In example 2, the users actually subscribe to profiles directly.
+In example 1, when a message is created, it will fan out to every user syncDb. In example 2, when a message is created it ends up in a "chatroom" syncdb. This required a new data type and a slightly different data model. Chatrooms define who belongs to them, not messages. The messages to field is just the chatroom.
+In example 1, a client just subscribes to the logged in user and thats pretty much it. In example 2, a client subscribes to the user and queries for what chatrooms theyre apart of and then subscribed to those chatrooms individually.
+
+
+For now, lets focus on keeping things simple with operations with the foresight that we will eventually want to use recordDb-style ivm within each syncDb for managing indexing.
+
+Please come up with a plan for how to implement all of this. Be explicit about the types and decisions trade-offs. Consider how to make the abstraction as clean, pure, functional, and explicit as possible. Include examples of what the final abstraction should feel like to use in real-world examples. Document the plan in docs/sync-examples.md

@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
 import { tupleDb } from "../tupleDb/TupleDb"
 import { ListArgs, Tuple } from "../tupleDb/types"
-import { SyncCache } from "./SyncClient"
+import { SyncClient } from "./SyncClient"
 import { syncDb } from "./SyncDb"
 import { syncServer } from "./SyncServer"
 import { Commit, JSONValue, Pubsub, ReadResult, SyncApi, SyncResult, WriteResult } from "./types"
@@ -31,11 +31,6 @@ const createPubsub = (): Pubsub => {
 const createApi = (server: any): SyncApi & { setOnline: (status: boolean) => void } => {
 	let online = true
 	return {
-		// setOnline is not on SyncApi, but we keep it on the object returned by createApi for testing control.
-		// However, TypeScript might complain if we assign this object to SyncApi type variable and it has extra methods?
-		// No, extra methods are fine.
-		// BUT we need to cast or define an intersection type if we want to use setOnline later.
-
 		setOnline: (status: boolean) => (online = status),
 
 		write: async (prefix: any[], commits: Commit[]): Promise<WriteResult> => {
@@ -64,26 +59,42 @@ const createApi = (server: any): SyncApi & { setOnline: (status: boolean) => voi
 describe("SyncDb Integration", () => {
 	it("syncs between client and server", async () => {
 		const serverDb = tupleDb()
+
+		// Global Reducers
 		const reducers = {
-			sendMessage: (db: any, msg: any) => {
-				db.set(["inbox", msg.id], msg)
+			sendMessage: (tx: any, userId: number, msg: any) => {
+				// Fanout to user SyncDb
+				// We use syncDb wrapper to generate proper Local Commits/Data structure
+				const userDb = syncDb(tx.subspace(["user", userId]))
+				userDb.write((ops: any) => {
+					// Local Reducer logic (inline)
+					ops.set(["inbox", msg.id], msg)
+				})
 			},
 		}
 
-		const server = syncServer(serverDb, reducers)
+		// Server must use 'useDataSubspace: false' to allow Global Reducers to access root
+		const server = syncServer(serverDb, reducers, { useDataSubspace: false })
 		const api = createApi(server)
 		const pubsub = createPubsub()
 
-		const cache = new SyncCache({ api, pubsub })
-		const session = cache.syncDb(["user", 1], reducers)
+		const client = new SyncClient({ api, pubsub, reducers })
+		// We can use local reducers for the session view if we want,
+		// but typically Session just reads data.
+		// For the test, we don't strictly need local reducers if we don't apply local updates via session.write.
+		const session = client.syncDb(["user", 1], {})
 
-		// 1. Dispatch Optimistic Op
+		// 1. Dispatch Optimistic Op (Global)
 		const msg1 = { id: "msg1", fromId: 1, text: "hello" }
-		session.write({}, (ops) => ops.sendMessage(msg1))
+		client.write({}, (ops) => ops.sendMessage(1, msg1))
 
 		// Verify optimistic update in Global Cache
+		// Logic: Global Write -> Local Commit -> Data Write
+		// Local Commit writes to ["user", 1, "history", ...]
+		// Data Write writes to ["user", 1, "data", "inbox", "msg1"]
+		// Note: SyncClient.cache is the root cache.
 		const key = ["user", 1, "data", "inbox", "msg1"]
-		const cacheRes = cache.cache.list({ gte: key, lte: key })
+		const cacheRes = client.cache.list({ gte: key, lte: key })
 		const val = cacheRes.hit?.[0]?.value
 
 		assert.ok(val, "Value should be present in cache")
@@ -98,7 +109,7 @@ describe("SyncDb Integration", () => {
 			.find((item) => JSON.stringify(item.key) === JSON.stringify(serverKey))
 		assert.ok(serverHit, "Item should be in server DB")
 
-		// Client DB check
+		// Client DB check (Session View)
 		const clientHit = session.data.list({ gte: ["inbox", "msg1"], lte: ["inbox", "msg1"] })
 		assert.equal(clientHit.length, 1)
 		assert.deepEqual(clientHit[0].value, msg1)
@@ -106,30 +117,35 @@ describe("SyncDb Integration", () => {
 
 	it("lazy fetch and partial sync", async () => {
 		const serverDb = tupleDb()
+		// Server Reducers (Global/Local mixed use for setup)
 		const reducers = {
-			setDoc: (db: any, [k, v]: [any, any]) => db.set(k, v),
+			setDoc: (tx: any, userId: number, k: any, v: any) => {
+				const userDb = syncDb(tx.subspace(["user", userId]))
+				userDb.write((ops: any) => ops.set(k, v))
+			},
 		}
-		const server = syncServer(serverDb, reducers)
+
+		const server = syncServer(serverDb, reducers, { useDataSubspace: false })
 		const api = createApi(server)
 		const pubsub = createPubsub()
 
 		// Pre-populate server with data
-		const serverUserDb = syncDb(serverDb.subspace(["user", 1]), reducers)
-		serverUserDb.write({
-			ops: [{ fn: "setDoc", args: [[["doc", "1"], "v1"]] }],
-		})
-		serverUserDb.write({
-			ops: [{ fn: "setDoc", args: [[["doc", "2"], "v2"]] }],
-		})
-		serverUserDb.write({
-			ops: [{ fn: "setDoc", args: [[["doc", "3"], "v3"]] }],
-		})
+		// We can use the server's syncDb wrapper directly?
+		// No, we need to bypass SyncServer's `write` to simulate existing data?
+		// Or just use api.write with Global Commit.
 
-		const cache = new SyncCache({ api, pubsub })
-		const session = cache.syncDb(["user", 1], reducers)
+		// Let's use SyncDb on the serverDb directly to populate "Local" data.
+		// This simulates data that exists before the client connects.
+		const serverUserDb = syncDb(serverDb.subspace(["user", 1])) // Local SyncDb
+		serverUserDb.write((ops: any) => ops.set(["doc", "1"], "v1"))
+		serverUserDb.write((ops: any) => ops.set(["doc", "2"], "v2"))
+		serverUserDb.write((ops: any) => ops.set(["doc", "3"], "v3"))
+
+		const client = new SyncClient({ api, pubsub, reducers })
+		const session = client.syncDb(["user", 1], {})
 
 		// 1. Dispatch optimistic write on client
-		session.write({}, (ops) => ops.setDoc([["doc", "4"], "v4"]))
+		client.write({}, (ops) => ops.setDoc(1, ["doc", "4"], "v4"))
 
 		// 2. Client requests range
 		const { remote } = session.data.subscribe({ gte: ["doc", "1"], lte: ["doc", "2"] }, () => {})
@@ -139,13 +155,9 @@ describe("SyncDb Integration", () => {
 		assert.deepEqual(results[0].value, "v1")
 		assert.deepEqual(results[1].value, "v2")
 
-		assert.ok(session.syncedClock >= 3)
+		assert.ok(session.clock() >= 3)
 
 		const doc3 = session.data.list({ gte: ["doc", "3"], lte: ["doc", "3"] })
-		// Doc 3 should be fetched because `read` calls `fetch` which gets all updates > clock.
-		// `server.fetch` returns all history > 0.
-		// serverUserDb history has ops for doc 1, 2, 3.
-		// All are applied.
 		assert.equal(doc3[0]?.value, "v3")
 
 		const doc4 = session.data.list({ gte: ["doc", "4"], lte: ["doc", "4"] })
@@ -155,14 +167,16 @@ describe("SyncDb Integration", () => {
 	it("server rejection / override handling", async () => {
 		const serverDb = tupleDb()
 		const reducers = {
-			post: (db: any, { id, content }: any) => {
-				// No longer have access to syncMetadata
-				const time = new Date().toISOString()
-				db.set(["posts", id], { content, time })
+			post: (tx: any, id: string, content: string) => {
+				const db = syncDb(tx.subspace(["feed"]))
+				db.write((ops: any) => {
+					const time = new Date().toISOString()
+					ops.set(["posts", id], { content, time })
+				})
 			},
 		}
 
-		const server = syncServer(serverDb, reducers)
+		const server = syncServer(serverDb, reducers, { useDataSubspace: false })
 		const api = createApi(server)
 		const pubsub = createPubsub()
 
@@ -175,14 +189,10 @@ describe("SyncDb Integration", () => {
 			return originalSync(prefix, newCommits, clock)
 		}
 
-		const cache = new SyncCache({ api, pubsub })
-		const session = cache.syncDb(["feed"], reducers)
+		const client = new SyncClient({ api, pubsub, reducers })
+		const session = client.syncDb(["feed"], {})
 
-		session.write({}, (ops) => ops.post({ id: "p1", content: "hello" }))
-
-		// With syncMetadata removed, we can't easily test the "server override via metadata" scenario
-		// in the same way (where the reducer reads the committedAt time).
-		// However, we can still verify that the sync happens and data eventually converges.
+		client.write({}, (ops) => ops.post("p1", "hello"))
 
 		await new Promise((r) => setTimeout(r, 50))
 
@@ -195,7 +205,8 @@ describe("SyncDb Integration", () => {
 		const reducers = {
 			log: (db: any, msg: string) => db.set(["logs", Date.now()], msg),
 		}
-		const server = syncServer(serverDb, reducers)
+		// Standard SyncServer (not global)
+		const server = syncServer(serverDb, reducers, { useDataSubspace: true })
 		const api = createApi(server)
 
 		// Direct write via transport/api
