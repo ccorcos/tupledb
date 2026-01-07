@@ -3,19 +3,14 @@ import { describe, it } from "node:test"
 import { randomId } from "../../shared/randomId"
 import { tupleDb } from "../../tupleDb/TupleDb"
 import { TupleDb } from "../../tupleDb/types"
-import { syncDb } from "../SyncDb"
 import { syncServer } from "../SyncServer"
-import { Commit, SyncApi } from "../types"
+import { Commit } from "../types"
+import { SimpleSyncClient } from "./SimpleSyncClient"
 import { ChatId, FanOutReducers, Message, User, UserId, UserProfile } from "./types"
 
 // ============================================================================
 // Helpers
 // ============================================================================
-
-// A simple in-memory SyncClient for Example 1
-// We rebuild a mini-client here to specifically match the single-subspace pattern
-// without the full complexity of the generic SyncClient if strictly needed,
-// but let's try to use the patterns from SyncDb.ts/SyncServer.ts.
 
 function createFanOutReducers(): FanOutReducers {
 	return {
@@ -31,25 +26,15 @@ function createFanOutReducers(): FanOutReducers {
 	}
 }
 
-describe("SyncExample1: Fan-out Architecture", () => {
-	it("should fan out messages to recipient subspaces", async () => {
+describe("SyncExample1: Fan-out Architecture with SimpleSyncClient", () => {
+	it("should fan out messages and update client via cache subscription", async () => {
 		// 1. Setup Server
-		// The server holds the "Master" DB.
 		const masterDb = tupleDb()
 		const serverApi = syncServer(masterDb, createFanOutReducers())
-
-		// We need a way to intercept "Intent" (High-level Ops) and fan them out.
-		// In this architecture, the client writes "Intent" to its own queue,
-		// or calls a server API.
-		// Let's model it as: Client writes to its own Outbox, Server processes Outbox.
-		// OR: Client calls a special "RPC" via a sync write?
-		// For this example, let's assume the Server provides a specific API `sendMessage`
-		// that internally writes to SyncDbs.
 
 		const chatMembers = new Map<ChatId, UserId[]>()
 		chatMembers.set("chat1", ["alice", "bob"])
 
-		// Server Logic: Fan-out
 		async function serverHandleSendMessage(
 			fromId: UserId,
 			chatId: ChatId,
@@ -64,98 +49,90 @@ describe("SyncExample1: Fan-out Architecture", () => {
 				createdAt: new Date().toISOString(),
 			}
 
-			// Fan out to each member's subspace
-			// We can batch these writes if SyncServer supports it,
-			// or just write sequentially.
+			// Fan out
 			for (const memberId of members) {
 				const scope = ["user", memberId]
-
-				// We construct a Commit for this user
 				const commit: Commit = {
 					id: randomId(),
-					clock: 0, // Server will assign
+					clock: 0,
 					commitedAt: new Date().toISOString(),
 					createdAt: new Date().toISOString(),
-					ops: [
-						{
-							fn: "putMessage",
-							args: [message],
-						},
-					],
+					ops: [{ fn: "putMessage", args: [message] }],
 				}
-
 				await serverApi.write(scope, [commit])
 			}
 		}
 
-		// 2. Setup Clients (Alice and Bob)
-		// They only subscribe to their own subspace: ["user", id]
+		// 2. Setup Clients
+		const createClient = (userId: string) =>
+			new SimpleSyncClient(serverApi, createFanOutReducers())
 
-		async function createClient(userId: string) {
-			const scope = ["user", userId]
-			let lastClock = 0
-			// Initial fetch
-			const res = await serverApi.read(scope, {}, lastClock)
-			lastClock = res.clock
+		const alice = createClient("alice")
+		const bob = createClient("bob")
 
-			// Client State
-			const db = tupleDb()
-			const reducers = createFanOutReducers()
-			const localSyncDb = syncDb(db, reducers)
-
-			// Apply initial data
-			// (In a real app, we'd hydrate from res.data and apply history updates)
-			for (const { value } of res.updates) {
-				localSyncDb.write(value as Commit) // This applies to local state
-			}
-
-			// Polling function to simulate subscription
-			async function poll() {
-				const updates = await serverApi.fetch(scope, lastClock)
-				if (updates.updates.length > 0) {
-					lastClock = updates.clock
-					for (const commit of updates.updates) {
-						localSyncDb.write(commit)
-					}
+		// 3. Alice Subscribes to her messages
+		const aliceMessages: Message[] = []
+		const aliceUnsub = alice
+			.sync(["user", "alice"])
+			.query({ prefix: ["messages"] }, (result) => {
+				if (!result.loading) {
+					aliceMessages.length = 0
+					aliceMessages.push(...result.data.map((i) => i.value))
 				}
+			})
+
+		// 4. Bob Subscribes to his messages
+		const bobMessages: Message[] = []
+		const bobUnsub = bob.sync(["user", "bob"]).query({ prefix: ["messages"] }, (result) => {
+			if (!result.loading) {
+				bobMessages.length = 0
+				bobMessages.push(...result.data.map((i) => i.value))
 			}
+		})
 
-			return {
-				userId,
-				db: localSyncDb,
-				poll,
-			}
-		}
+		// Initial state
+		assert.equal(aliceMessages.length, 0)
 
-		const alice = await createClient("alice")
-		const bob = await createClient("bob")
-
-		// 3. Action: Alice sends a message
+		// 5. Action: Alice sends a message
 		await serverHandleSendMessage("alice", "chat1", "Hello Bob!")
 
-		// 4. Sync: Clients receive updates
-		await alice.poll()
-		await bob.poll()
+		// 6. Refresh Clients (Simulate polling)
+		// We need to expose refresh from the handle?
+		// For the test, we can just re-trigger the query internal fetch?
+		// Or simpler: The `query` method in SimpleSyncClient triggers `refresh`.
+		// But here we want to trigger it manually again.
+		// Let's add a public refresh to the client for testing or just re-subscribe?
+		// Re-subscribing is messy.
+		// Let's modify SimpleSyncClient to expose a way to refresh a scope.
+		// Or... we just use the `refresh` method on the scoped sync if we kept a reference.
+		// The `query` returned an unsubscribe.
+		// Let's instantiate the ScopedSync first.
 
-		// 5. Verify
-		// Alice should see the message in her DB
-		const aliceMsgs = alice.db.data.list({ prefix: ["messages"] })
-		assert.equal(aliceMsgs.length, 1)
-		assert.equal((aliceMsgs[0].value as Message).body, "Hello Bob!")
+		const aliceScope = alice.sync(["user", "alice"])
+		const bobScope = bob.sync(["user", "bob"])
 
-		// Bob should see the message in his DB
-		const bobMsgs = bob.db.data.list({ prefix: ["messages"] })
-		assert.equal(bobMsgs.length, 1)
-		assert.equal((bobMsgs[0].value as Message).body, "Hello Bob!")
+		// We need to re-run the query subscription logic to hook up the 'refresh' but `query` handles it.
+		// But for TEST we want to force a refresh now.
+		await aliceScope.refresh({ prefix: ["messages"] })
+		await bobScope.refresh({ prefix: ["messages"] })
 
-		// 6. Action: Bob replies
+		// 7. Verify
+		assert.equal(aliceMessages.length, 1)
+		assert.equal(aliceMessages[0].body, "Hello Bob!")
+
+		assert.equal(bobMessages.length, 1)
+		assert.equal(bobMessages[0].body, "Hello Bob!")
+
+		// 8. Action: Bob replies
 		await serverHandleSendMessage("bob", "chat1", "Hi Alice!")
 
-		await alice.poll()
-		await bob.poll()
+		await aliceScope.refresh({ prefix: ["messages"] })
+		await bobScope.refresh({ prefix: ["messages"] })
 
-		const aliceMsgs2 = alice.db.data.list({ prefix: ["messages"] })
-		assert.equal(aliceMsgs2.length, 2)
-		assert.equal((aliceMsgs2[1].value as Message).body, "Hi Alice!")
+		assert.equal(aliceMessages.length, 2)
+		assert.equal(aliceMessages[1].body, "Hi Alice!")
+
+		aliceUnsub()
+		bobUnsub()
 	})
 })

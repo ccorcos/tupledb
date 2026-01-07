@@ -569,3 +569,9 @@ In example 1, a client just subscribes to the logged in user and thats pretty mu
 For now, lets focus on keeping things simple with operations with the foresight that we will eventually want to use recordDb-style ivm within each syncDb for managing indexing.
 
 Please come up with a plan for how to implement all of this. Be explicit about the types and decisions trade-offs. Consider how to make the abstraction as clean, pure, functional, and explicit as possible. Include examples of what the final abstraction should feel like to use in real-world examples. Document the plan in docs/sync-examples.md
+
+---
+
+This all feels way off. Lets focus on the abstraction and the documentation and don't write any more code until we figure it out. Continue writing in the sync-examples.md file... The server is simple. Its a database, api, and pubsub. The database has a way of accpeting write operations, applying operations, publishing clocks, and an api for reading/writing. The client has a cache and the client developer experience should just be something as simple as getting a syncDb path from the cache and querying it. The response should say whether oits in the cache or not and fetch things in the background and reactively call the callback in the query saying there's changes. Clients should have to unsubscribe explicitly to free the reference counter from the cache. The cache also needs to handle optimistic updating by applying operations and keeping a queue of outbound writes to send to the server to reconcile.
+
+---

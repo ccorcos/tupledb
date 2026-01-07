@@ -49,6 +49,60 @@ type Chatroom = {
 
 ---
 
+## Client-Side Architecture: Partial Replication & Cache-First
+
+The client does **not** maintain a full replica of the database. Instead, it uses a **Cache-First** approach backed by `TupleCache`.
+
+### TupleCache & SyncManager
+
+The core idea is to provide a clean, reactive developer experience (DX) that hides the complexity of network sync, while giving full control over what data is loaded.
+
+1.  **TupleCache**: The single source of truth for the UI. It holds whatever partial state has been loaded.
+2.  **SyncManager**: Manages network requests, subscriptions, and optimistic updates.
+3.  **Scoped Subscriptions**: Developers "subscribe" to a specific SyncDb path (subspace).
+
+### Developer Experience (DX)
+
+The API is designed to be simple and reactive.
+
+```typescript
+// 1. Get a handle to a specific SyncDb subspace (e.g., current user)
+const userDb = client.sync(["users", "me"])
+
+// 2. Query data. The callback fires immediately with cached data,
+//    and again when data arrives from the server.
+const unsubscribe = userDb.query({ prefix: ["todos"] }, (result) => {
+   if (result.loading) showSpinner()
+   renderTodos(result.data)
+})
+
+// 3. Write data. Updates cache optimistically, then syncs to server.
+userDb.write(ops.addTodo("Buy milk"))
+
+// 4. Cleanup when component unmounts
+unsubscribe()
+```
+
+### The "Waterfall" Pattern
+
+Real-world apps often require dependent data fetching. This architecture supports it naturally via nested subscriptions.
+
+1.  **Fetch User**: Subscribe to `["user", "me"]` -> Get `chatIds`.
+2.  **Fetch Chats**: Inside the user callback, map over `chatIds` and subscribe to each `["chat", id]`.
+3.  **Render**: The UI updates incrementally as data flows in.
+
+---
+
+## Server Architecture
+
+The server is a simplified composition of three parts:
+
+1.  **Database**: A `TupleDb` that stores all data and history.
+2.  **API**: Exposes `read`, `write`, and `fetch` endpoints.
+3.  **PubSub**: Broadcasts `clock` updates when specific subspaces change.
+
+---
+
 ## Example 1: Fan-out Architecture
 
 In this model, every user has their own isolated `SyncDb` subspace. The server is responsible for distributing updates to all relevant users.
@@ -56,9 +110,9 @@ In this model, every user has their own isolated `SyncDb` subspace. The server i
 ### Architecture
 
 *   **Client**:
-    *   Connects to a single `SyncDb` subspace: `["user", userId]`.
-    *   Subscribes to `["data"]` for all updates.
-    *   Submits actions (Intent) to the server, which are then processed and fanned out.
+    *   Subscribes *only* to `["user", userId]` (the inbox).
+    *   Submits actions (Intent) to the server.
+    *   **Partial Data**: The client never sees the full DB, only its own inbox.
 *   **Server**:
     *   Receives high-level operations.
     *   Executes logic to determine recipients.
@@ -81,21 +135,6 @@ type FanOutReducers = {
 }
 ```
 
-### Server Logic (Pseudo-code)
-
-```typescript
-function handleSendMessage(senderId, chatId, body) {
-    const members = getChatMembers(chatId)
-    const message = { id: randomId(), chatId, fromId: senderId, body, ... }
-
-    for (const memberId of members) {
-        // Write to each member's isolated syncDb
-        const memberDb = getSyncDb(["user", memberId])
-        memberDb.write(ops => ops.putMessage(message))
-    }
-}
-```
-
 ---
 
 ## Example 2: Normalized / Multi-Subspace Architecture
@@ -105,9 +144,10 @@ In this model, data is stored in shared subspaces (e.g., a specific Chatroom). C
 ### Architecture
 
 *   **Client**:
-    *   Subscribes to `["user", userId]` for private data (list of chats).
-    *   Subscribes to `["chat", chatId]` for each active chatroom.
-    *   Subscribes to `["profiles"]` (global or sharded) for user profiles.
+    *   **Waterfall Subscription**:
+        1. Subscribe `["user", userId]` -> Get list of chats.
+        2. Subscribe `["chat", chatId]` -> Get messages for active chat.
+    *   **Partial Data**: Client only caches the active chat's messages, not all history for all chats.
 *   **Server**:
     *   Accepts transactional commits that may span multiple subspaces.
     *   Applies changes to the respective shared `SyncDb` instances.
@@ -130,53 +170,13 @@ type ChatReducers = {
 }
 ```
 
-**Profile Subspace Reducers** (`["profiles"]`):
-```typescript
-type ProfileReducers = {
-    updateProfile: (profile: UserProfile) => void
-}
-```
-
-### Client Transaction Logic
-
-The client needs to be able to bundle operations targeting different logical databases.
-
-```typescript
-// Client-side transaction
-client.write(ops => {
-    // Op 1: Add chat to user's list
-    ops.scope(["user", myId]).joinChat(chatId)
-
-    // Op 2: Post initial message to the chat subspace
-    ops.scope(["chat", chatId]).postMessage(helloMsg)
-})
-```
-
 ---
 
 ## Implementation Plan
 
-1.  **Define Types**: Create `src/syncDb/examples/types.ts` (or similar) to hold the shared domain models and reducer definitions.
-2.  **Mock Network**: Create a `SimulatedNetwork` class to connect `SyncClient` and `SyncServer` with controlled latency/reliability (optional, but good for tests).
-3.  **SyncExample1.test.ts**:
-    *   Setup `SyncServer`.
-    *   Implement "Fan-out" logic on the server `write` handler.
-    *   Instantiate `SyncClient` for User A and User B.
-    *   User A sends message -> Server fans out -> User B sees message in their `data`.
-4.  **SyncExample2.test.ts**:
-    *   Setup `SyncServer`.
-    *   Implement "Multi-scope" write handling.
-    *   Instantiate `SyncClient`.
-    *   Demonstrate subscribing to `UserDb` to discover `ChatDb`.
-    *   Demonstrate cross-db write (Join Chat + Post Message).
-
-## Future: RecordDb Integration
-
-*   Replace raw `tupleDb.set` calls in reducers with `RecordLayer` operations (e.g., `Users.insert(user)`).
-*   Use `RecordLayer`'s IVM (Incremental View Maintenance) to automatically maintain indexes (e.g., `Messages.byDate`).
-
----
-
-This looks great. However the clients should be using the TupleCache at the very least. Clients are not fully replicated but only partially replicated. Its the developers responsibility to ensure that reducers will lead to eventual consistency when applying to a partially available database. And for simple sets and deletes, this should mostly be the case. It seems that SyncCache and SyncClient attempt to fill some of this functionality. However, it seems to be incomplete / the abstractions feel a little too belabored. So please incorporate those changes into these examples as well as the plan document so that we aren't fully replicating the database to the clients. And to make the examples a little more realistic, consider on the client what it would look like to query for data, checking the cache before going to the server to request the data, render that data, and listen for changes. You can include a single waterfall request example too, fetch the user and then fetch the chatrooms etc. Do this all with clean abstactions and test the whole flow within the examples.
-
-
+1.  **Refine Types**: Update `src/syncDb/examples/types.ts` to match the new simpler architecture.
+2.  **Implement Client**: Create a clean `SimpleSyncClient` that focuses on the `sync(path).query(...)` DX.
+    *   Must handle `TupleCache` interactions internally.
+    *   Must handle optimistic writes and queueing.
+3.  **SyncExample1.test.ts**: Re-implement to use the new client DX for the Fan-out case.
+4.  **SyncExample2.test.ts**: Re-implement to demonstrate the Waterfall pattern using the new client DX.
