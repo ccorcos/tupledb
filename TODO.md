@@ -15,6 +15,19 @@ Gemini.md...
 - use a separate types file
 
 
+
+---
+
+Please come up with a high level description of this project based on @src/ @GEMINI.md @README.md @prompts/ivm-prompts.md  @prompts/sync-prompts.md  @prompts/tupledb-context.md Lets plan on creating a few files from this to help document how things work, how to use it, examples, architectural principles, coding style, patterns. Lets also write about the roadmap and desired direction for what has yet to be built along with some usage examples and ideas about what to build next. Lets tie all of this gether with CLAUDE.md and and files in a docs folder so claude code knows where to read more to learn about different aspects.
+
+
+
+
+
+
+
+
+
 ---
 
 Example 1: user subspace sync with full fanout
