@@ -17,6 +17,30 @@ Gemini.md...
 
 ---
 
+Example 1: user subspace sync with full fanout
+Example 2: chatroom subspace sync with partial fanout
+
+
+I'll just have to do this myself...
+
+const ChatAppReducers = {
+	putUser: (tx: TupleDb, user: User) => {
+		tx.set(["users", user.id], user)
+	},
+	putMessage: (tx: TupleDb, msg: Message) => {
+		tx.set(["messages", msg.chatId, msg.createdAt, msg.id], msg)
+	},
+	putProfile: (tx: TupleDb, profile: UserProfile) => {
+		tx.set(["profiles", profile.id], profile)
+	},
+} satisfies ReducerMap
+
+I
+
+
+
+
+
 You definitely need the fanout though. The clients don't have all the data, or permission.
 * Fanning out a message to send is a perfect example. We need this top-level idea.
 * Writing to two Notion blocks transactionally so that pointers line up is a different but relevant example.

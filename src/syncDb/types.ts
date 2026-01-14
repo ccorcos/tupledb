@@ -71,6 +71,7 @@ export interface IClientSyncDb<R extends ReducerMap> {
 	history: {
 		list: (args?: ListArgs<Tuple>) => { key: Tuple; value: any }[]
 	}
+    write(meta: CommitMeta, build: (ops: OpsBuilder<R>) => void): void
 	// Write is now typically handled via the global client.write,
 	// but we might keep a convenience method or remove it.
 	// For this refactor, we focus on the global path.

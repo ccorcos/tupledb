@@ -14,7 +14,10 @@ import {
 export function syncServer(
 	db: TupleDb,
 	reducers: ReducerMap,
-	options: { useDataSubspace?: boolean } = {}
+	options: {
+		useDataSubspace?: boolean
+		publish?: (scope: Tuple, clock: number) => void
+	} = {}
 ): SyncApi {
 	const useDataSubspace = options.useDataSubspace ?? true
 
@@ -26,6 +29,7 @@ export function syncServer(
 		const historyTx = scopeTx.subspace(["history"])
 
 		let operationsApplied = false
+		let nextClock = 0
 
 		for (const commit of commits) {
 			if (tx.get(["seen", commit.id])) continue
@@ -34,7 +38,7 @@ export function syncServer(
 			operationsApplied = true
 
 			const clock = (scopeTx.get(["clock"]) as number) ?? 0
-			const nextClock = clock + 1
+			nextClock = clock + 1
 
 			const serverCommit: Commit = {
 				...commit,
@@ -60,6 +64,9 @@ export function syncServer(
 
 		if (operationsApplied) {
 			tx.commit()
+			if (options.publish) {
+				options.publish(scope, nextClock)
+			}
 		}
 
 		// Return current clock
