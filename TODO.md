@@ -12,13 +12,33 @@ Gemini.md...
 - tupledb
 - syncdb
 - recorddb
-- use a separate types file
+- use a separate types files
 
 
 
 ---
 
-Please come up with a high level description of this project based on @src/ @GEMINI.md @README.md @prompts/ivm-prompts.md  @prompts/sync-prompts.md  @prompts/tupledb-context.md Lets plan on creating a few files from this to help document how things work, how to use it, examples, architectural principles, coding style, patterns. Lets also write about the roadmap and desired direction for what has yet to be built along with some usage examples and ideas about what to build next. Lets tie all of this gether with CLAUDE.md and and files in a docs folder so claude code knows where to read more to learn about different aspects.
+SyncDb server + pubsub backend plan
+
+
+global syncDb: syncdb with "seen" for idempotency and no history, transactional pubsub as well
+internal syncDb: have their own history, with potentially different operations.
+clients write to the global syncDb operations, but sync down individul syncDb histories and apply those operations.
+
+
+
+
+
+Lets build some examples
+1. a chat app, three types of records, user, profile, message. Each user gets a syncDb and writes fan out to all the relevant users. adding messages to inboxes or outboxes, editing user profiles, etc. This is the "full fanout" approach where clients only need to subscribe to a single syncdb clock.
+2. the same chat app, but normalized a bit more. Users have an inbox syncdb, and outbox syncdb, and each individual profile is its own syncdb too. This way, the clients will have to subscribe to many syncDbs at once.
+
+Contacts app example?
+
+
+
+
+Lets build a simple but functional chat app as an example. three types of records, user, profile, message. We don't need to worry about permissions and validation for now, but in spirit, all the user's names are public via their profile. And then you can create messages to one or more person. This drops those messages into the users inbox/outbox kind of like email. For now, lets consider fanout on write so that messages are denormalized.
 
 
 
@@ -27,28 +47,47 @@ Please come up with a high level description of this project based on @src/ @GEM
 
 
 
-
----
+Sync cache frontend plan. Lets run through those examples.
 
 Example 1: user subspace sync with full fanout
+
+```
+const ChatAppReducers = (authorId: string) => ({
+	set(tx: TupleDb, args: {table: "user", id: string, value: User} | {table: "message", id: string, value: Message} | {table: "profile", id: string, value: Profile}) {
+		if (args.table === "user") {
+			tx.set(["users", user.id], user)
+		}
+		if (args.table === "message") {
+			tx.set(["messages", msg.chatId, msg.createdAt, msg.id], msg)
+		}
+		// ...
+	}
+	delete(tx: TupleDb, args: {table: "user" | "message" | "profile", id: string}) {
+		//...
+	}
+})
+```
+
 Example 2: chatroom subspace sync with partial fanout
 
 
-I'll just have to do this myself...
 
 const ChatAppReducers = {
-	putUser: (tx: TupleDb, user: User) => {
-		tx.set(["users", user.id], user)
-	},
-	putMessage: (tx: TupleDb, msg: Message) => {
-		tx.set(["messages", msg.chatId, msg.createdAt, msg.id], msg)
-	},
-	putProfile: (tx: TupleDb, profile: UserProfile) => {
-		tx.set(["profiles", profile.id], profile)
-	},
-} satisfies ReducerMap
+	set(tx: TupleDb, args: {table: "user", id: string, value: User} | {table: "message", id: string, value: Message} | {table: "profile", id: string, value: Profile}) {
+		if (args.table === "user") {
+			tx.set(["users", user.id], user)
+		}
+		if (args.table === "message") {
+			tx.set(["messages", msg.chatId, msg.createdAt, msg.id], msg)
+		}
+		// ...
+	}
+	delete(tx: TupleDb, args: {table: "user" | "message", id: string}) {
+		//...
+	}
 
-I
+}
+
 
 
 
