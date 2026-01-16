@@ -115,11 +115,7 @@ export type ReadResult = FetchResult & {
 	data: { key: Tuple; value: any }[]
 }
 
-export type Pubsub = {
-	publish(tuple: Tuple, value: JSONValue): void
-	subscribe(tuple: Tuple): void
-	onMessage(listener: (tuple: Tuple, value: JSONValue) => void): () => void
-}
+// Note: PubSub types are now in PubSub.ts
 
 export type SyncApi = {
 	write(scope: Tuple, commits: Commit[]): Promise<WriteResult>

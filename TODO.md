@@ -26,6 +26,15 @@ internal syncDb: have their own history, with potentially different operations.
 clients write to the global syncDb operations, but sync down individul syncDb histories and apply those operations.
 
 
+We need to slow down and actually do some designing... Lets focus on some specs and focus on how they work. That way we have a north star to build towards. Lets do this through a series of examples.
+
+- Comms / Email Chat
+- Chatrooms
+- Social Feed
+
+Take it slow!
+
+
 
 
 

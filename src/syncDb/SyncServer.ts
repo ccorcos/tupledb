@@ -11,62 +11,67 @@ import {
 	WriteResult,
 } from "./types"
 
-export function syncServer(
-	db: TupleDb,
-	reducers: ReducerMap,
-	options: {
-		useDataSubspace?: boolean
-		publish?: (scope: Tuple, clock: number) => void
-	} = {}
-): SyncApi {
-	const useDataSubspace = options.useDataSubspace ?? true
+/**
+ * Core function that applies a commit to a syncDb scope.
+ * Does NOT manage transactions - caller is responsible for transaction lifecycle.
+ * Always uses ["data"] subspace for user data.
+ *
+ * @param scopeTx - The scope's TupleDb (already in a transaction context)
+ * @param reducers - The reducer functions to apply operations
+ * @param commit - The commit to apply
+ * @returns The new clock value after applying the commit
+ */
+export function applyCommit(scopeTx: TupleDb, reducers: ReducerMap, commit: Commit): number {
+	const dataTx = scopeTx.subspace(["data"])
+	const historyTx = scopeTx.subspace(["history"])
 
+	const clock = (scopeTx.get(["clock"]) as number) ?? 0
+	const nextClock = clock + 1
+
+	const serverCommit: Commit = {
+		...commit,
+		clock: nextClock,
+		commitedAt: new Date().toISOString(),
+	}
+
+	// Write history
+	historyTx.set([nextClock], serverCommit)
+	scopeTx.set(["clock"], nextClock)
+
+	// Apply Ops (always use data subspace)
+	for (const op of commit.ops) {
+		const reducer = reducers[op.fn] || (defaultReducers as any)[op.fn]
+		if (reducer) {
+			reducer(dataTx, ...op.args)
+		} else {
+			console.warn(`Unknown operation: ${op.fn}`)
+		}
+	}
+
+	return nextClock
+}
+
+export function syncServer(db: TupleDb, reducers: ReducerMap): SyncApi {
 	// Just submit writes, return confirmation (clock)
 	async function write(scope: Tuple, commits: Commit[]): Promise<WriteResult> {
 		const tx = tupleTx(db)
 		const scopeTx = tx.subspace(scope)
-		const dataTx = scopeTx.subspace(["data"])
-		const historyTx = scopeTx.subspace(["history"])
 
 		let operationsApplied = false
 		let nextClock = 0
 
 		for (const commit of commits) {
+			// Deduplication check at root level
 			if (tx.get(["seen", commit.id])) continue
 
 			tx.set(["seen", commit.id], Date.now())
 			operationsApplied = true
 
-			const clock = (scopeTx.get(["clock"]) as number) ?? 0
-			nextClock = clock + 1
-
-			const serverCommit: Commit = {
-				...commit,
-				clock: nextClock,
-				commitedAt: new Date().toISOString(),
-			}
-
-			// Write history
-			historyTx.set([nextClock], serverCommit)
-			scopeTx.set(["clock"], nextClock)
-
-			// Apply Ops
-			const targetTx = useDataSubspace ? dataTx : scopeTx
-			for (const op of commit.ops) {
-				const reducer = reducers[op.fn] || (defaultReducers as any)[op.fn]
-				if (reducer) {
-					reducer(targetTx, ...op.args)
-				} else {
-					console.warn(`Unknown operation: ${op.fn}`)
-				}
-			}
+			nextClock = applyCommit(scopeTx, reducers, commit)
 		}
 
 		if (operationsApplied) {
 			tx.commit()
-			if (options.publish) {
-				options.publish(scope, nextClock)
-			}
 		}
 
 		// Return current clock
