@@ -601,4 +601,9 @@ src/syncDb/examples/Messaging.ts
 src/syncDb/examples/TodoMVC.test.ts
 src/syncDb/examples/TodoMVC.ts
 
+---
+
+Lets write some tests for src/examples/TodoMVC.ts Lets make sure to cover the following basics: create a list, delete a list, update the list name, create todo, delete a todo, rename a todo, check a todo, reorder a todo, updating a todo should update the list editedAt. We should verify action order in the history.
+
+Make sure your testing code is well factored and very readable. Use whatever helper functions and abstractions necessary to do a good job.
 

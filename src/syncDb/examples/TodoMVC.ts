@@ -1,246 +1,125 @@
-import { generateKeyBetween } from "fractional-indexing"
-import { Tuple, TupleDb } from "../../tupleDb/types"
-import { applySyncCommit } from "../SyncNode"
-import { CommitMeta, ReducerMap } from "../types"
-
-// =============================================================================
-// Types
-// =============================================================================
+import { applySyncCommit } from "syncDb/SyncNode"
+import { CommitMeta, ReducerMap } from "syncDb/types"
+import { TupleDb } from "tupleDb/types"
 
 export type TodoList = {
 	id: string
 	name: string
+	editedAt: string
 }
 
 export type Todo = {
 	id: string
+	listId: string
 	text: string
 	checked: boolean
-	order: string // Fractional index for ordering
+	order: string // Fractional index
 }
 
-// =============================================================================
-// Scope Reducers: TodoList (at ["todoList", listId])
-// =============================================================================
-
-export const todoListReducers: ReducerMap = {
-	init: (tx: TupleDb, _commit: CommitMeta, list: TodoList) => {
-		tx.set(["info"], list)
+// syncDb at ["todoList", listId]
+const todoListReducers = {
+	setList: (tx: TupleDb, commit: CommitMeta, list: TodoList) => {
+		tx.set([], list)
 	},
 
-	addTodo: (tx: TupleDb, _commit: CommitMeta, todo: Todo) => {
-		tx.set(["todo", todo.id], todo)
-		// Index by order for all todos
-		tx.set(["all", todo.order, todo.id], null)
-		// Index by checked status
-		if (todo.checked) {
-			tx.set(["checked", todo.order, todo.id], null)
-		} else {
-			tx.set(["unchecked", todo.order, todo.id], null)
-		}
-	},
+	setTodo: (tx: TupleDb, commit: CommitMeta, todo: Todo) => {
+		// Handle upsert
+		todoListReducers.deleteTodo(tx, commit, todo.id)
 
-	updateTodo: (tx: TupleDb, _commit: CommitMeta, todo: Todo) => {
-		const existing = tx.get(["todo", todo.id]) as Todo | undefined
-		if (!existing) return
-
-		// Remove old indexes
-		tx.delete(["all", existing.order, todo.id])
-		if (existing.checked) {
-			tx.delete(["checked", existing.order, todo.id])
-		} else {
-			tx.delete(["unchecked", existing.order, todo.id])
-		}
-
-		// Write updated todo
 		tx.set(["todo", todo.id], todo)
 
-		// Add new indexes
 		tx.set(["all", todo.order, todo.id], null)
-		if (todo.checked) {
-			tx.set(["checked", todo.order, todo.id], null)
-		} else {
-			tx.set(["unchecked", todo.order, todo.id], null)
-		}
+		if (todo.checked) tx.set(["checked", todo.order, todo.id], null)
+		else tx.set(["unchecked", todo.order, todo.id], null)
 	},
 
-	toggleTodo: (tx: TupleDb, _commit: CommitMeta, todoId: string) => {
+	deleteTodo: (tx: TupleDb, commit: CommitMeta, todoId: string) => {
 		const todo = tx.get(["todo", todoId]) as Todo | undefined
 		if (!todo) return
-
-		// Update checked status
-		const newChecked = !todo.checked
-		tx.set(["todo", todoId], { ...todo, checked: newChecked })
-
-		// Update indexes
-		if (todo.checked) {
-			tx.delete(["checked", todo.order, todoId])
-			tx.set(["unchecked", todo.order, todoId], null)
-		} else {
-			tx.delete(["unchecked", todo.order, todoId])
-			tx.set(["checked", todo.order, todoId], null)
-		}
-	},
-
-	deleteTodo: (tx: TupleDb, _commit: CommitMeta, todoId: string) => {
-		const todo = tx.get(["todo", todoId]) as Todo | undefined
-		if (!todo) return
-
 		tx.delete(["todo", todoId])
+
 		tx.delete(["all", todo.order, todoId])
-		if (todo.checked) {
-			tx.delete(["checked", todo.order, todoId])
-		} else {
-			tx.delete(["unchecked", todo.order, todoId])
-		}
+		if (todo.checked) tx.delete(["checked", todo.order, todoId])
+		else tx.delete(["unchecked", todo.order, todoId])
+	},
+} satisfies ReducerMap
+
+// syncDb at ["users", userId]
+const userReducers = {
+	setList: (tx: TupleDb, commit: CommitMeta, list: TodoList) => {
+		// Handle upsert
+		userReducers.removeList(tx, commit, list.id)
+
+		tx.set(["listByEditedAt", list.editedAt, list.id], null)
+		tx.set(["list", list.id], list)
 	},
 
-	reorderTodo: (tx: TupleDb, _commit: CommitMeta, todoId: string, newOrder: string) => {
-		const todo = tx.get(["todo", todoId]) as Todo | undefined
-		if (!todo) return
-
-		// Remove old order indexes
-		tx.delete(["all", todo.order, todoId])
-		if (todo.checked) {
-			tx.delete(["checked", todo.order, todoId])
-		} else {
-			tx.delete(["unchecked", todo.order, todoId])
-		}
-
-		// Update todo with new order
-		const updated = { ...todo, order: newOrder }
-		tx.set(["todo", todoId], updated)
-
-		// Add new order indexes
-		tx.set(["all", newOrder, todoId], null)
-		if (todo.checked) {
-			tx.set(["checked", newOrder, todoId], null)
-		} else {
-			tx.set(["unchecked", newOrder, todoId], null)
-		}
-	},
-}
-
-// =============================================================================
-// Scope Reducers: User (at ["users", userId])
-// =============================================================================
-
-export const userReducers: ReducerMap = {
-	addList: (tx: TupleDb, _commit: CommitMeta, order: string, listId: string) => {
-		tx.set(["lists", order, listId], null)
-		tx.set(["listMap", listId], order)
+	updateEditedAt: (tx: TupleDb, commit: CommitMeta, listId: string, editedAt: string) => {
+		const list = tx.get(["list", listId])
+		if (!list) return
+		tx.delete(["listByEditedAt", list.editedAt, list.id])
+		tx.set(["listByEditedAt", editedAt, list.id], null)
 	},
 
-	removeList: (tx: TupleDb, _commit: CommitMeta, listId: string) => {
-		const order = tx.get(["listMap", listId]) as string | undefined
-		if (order) {
-			tx.delete(["lists", order, listId])
-			tx.delete(["listMap", listId])
-		}
-	},
-}
+	removeList: (tx: TupleDb, commit: CommitMeta, listId: string) => {
+		const list = tx.get(["list", listId])
+		if (!list) return
 
-// =============================================================================
-// App Reducers
-// =============================================================================
+		tx.delete(["listByEditedAt", list.editedAt, list.id])
+		tx.delete(["list", list.id])
+	},
+} satisfies ReducerMap
+
 
 export const todoAppReducers = {
-	createList: (
-		tx: TupleDb,
-		commit: CommitMeta,
-		args: { listId: string; name: string; userId: string }
-	) => {
-		const { listId, name, userId } = args
-		const userScope: Tuple = ["users", userId]
-		const listScope: Tuple = ["todoList", listId]
+	setList: (tx: TupleDb, commit: CommitMeta, list: TodoList) => {
+		if (!commit.authorId) throw new Error("You need to be logged in.")
+		const userId = commit.authorId
 
-		// Determine order for the new list (append to end)
-		const userNode = tx.subspace([...userScope, "data"])
-		const existingLists = userNode.subspace(["lists"]).list({ reverse: true, limit: 1 })
-		const lastOrder = existingLists[0]?.key[0] as string | undefined
-		const order = generateKeyBetween(lastOrder, null)
-
-		// Add list reference to user's scope
-		applySyncCommit(tx, userScope, userReducers, {
+		applySyncCommit(tx, ["users", userId], userReducers, {
 			...commit,
-			ops: [{ fn: "addList", args: [order, listId] }],
+			ops: [{ fn: "setList", args: [list] }],
 		})
 
-		// Create the list itself
-		applySyncCommit(tx, listScope, todoListReducers, {
+		applySyncCommit(tx, ["todoList", list.id], todoListReducers, {
 			...commit,
-			ops: [{ fn: "init", args: [{ id: listId, name }] }],
+			ops: [{ fn: "setList", args: [list] }],
 		})
 	},
 
-	deleteList: (tx: TupleDb, commit: CommitMeta, args: { listId: string; userId: string }) => {
-		const { listId, userId } = args
-		const userScope: Tuple = ["users", userId]
+	// Soft delete so we can undo, so that sync works, etc.
+	removeList: (tx: TupleDb, commit: CommitMeta, listId: string) => {
+		if (!commit.authorId) throw new Error("You need to be logged in.")
+		const userId = commit.authorId
 
-		// Remove list reference from user's scope
-		applySyncCommit(tx, userScope, userReducers, {
+		applySyncCommit(tx, ["users", userId], userReducers, {
 			...commit,
 			ops: [{ fn: "removeList", args: [listId] }],
 		})
-
-		// Note: We don't delete the list data itself (could be shared with other users)
-		// In a full implementation, you'd track list membership
 	},
 
-	addTodo: (tx: TupleDb, commit: CommitMeta, args: { listId: string; todo: Todo }) => {
-		const { listId, todo } = args
-		const listScope: Tuple = ["todoList", listId]
-
-		applySyncCommit(tx, listScope, todoListReducers, {
+	addTodo: (tx: TupleDb, commit: CommitMeta, todo: Todo) => {
+		applySyncCommit(tx, ["todoList", todo.listId], todoListReducers, {
 			...commit,
-			ops: [{ fn: "addTodo", args: [todo] }],
+			ops: [{ fn: "setTodo", args: [todo] }],
 		})
 	},
 
-	updateTodo: (tx: TupleDb, commit: CommitMeta, args: { listId: string; todo: Todo }) => {
-		const { listId, todo } = args
-		const listScope: Tuple = ["todoList", listId]
-
-		applySyncCommit(tx, listScope, todoListReducers, {
-			...commit,
-			ops: [{ fn: "updateTodo", args: [todo] }],
-		})
-	},
-
-	toggleTodo: (tx: TupleDb, commit: CommitMeta, args: { listId: string; todoId: string }) => {
-		const { listId, todoId } = args
-		const listScope: Tuple = ["todoList", listId]
-
-		applySyncCommit(tx, listScope, todoListReducers, {
-			...commit,
-			ops: [{ fn: "toggleTodo", args: [todoId] }],
-		})
-	},
-
-	deleteTodo: (tx: TupleDb, commit: CommitMeta, args: { listId: string; todoId: string }) => {
-		const { listId, todoId } = args
-		const listScope: Tuple = ["todoList", listId]
-
-		applySyncCommit(tx, listScope, todoListReducers, {
-			...commit,
-			ops: [{ fn: "deleteTodo", args: [todoId] }],
-		})
-	},
-
-	reorderTodo: (
+	deleteTodo: (
 		tx: TupleDb,
 		commit: CommitMeta,
-		args: { listId: string; todoId: string; newOrder: string }
+		args: { listId: string; todoId: string }
 	) => {
-		const { listId, todoId, newOrder } = args
-		const listScope: Tuple = ["todoList", listId]
-
-		applySyncCommit(tx, listScope, todoListReducers, {
+		const { listId, todoId } = args
+		applySyncCommit(tx, ["todoList", listId], todoListReducers, {
 			...commit,
-			ops: [{ fn: "reorderTodo", args: [todoId, newOrder] }],
+			ops: [{ fn: "deleteTodo", args: [todoId] }],
 		})
 	},
 } satisfies ReducerMap
 
 // Type for app reducers
-export type TodoAppReducers = typeof todoAppReducers
+type TodoAppReducers = typeof todoAppReducers
+
+
+
