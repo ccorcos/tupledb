@@ -7,7 +7,185 @@ HERE: HumanTodoMVC
 
 
 
-Lets write some tests for src/examples/TodoMVC.ts Lets make sure to cover the following basics: create a list, delete a list, update the list name, create todo, delete a todo, rename a todo, check a todo, reorder a todo, updating a todo should update the list editedAt. We should verify action order in the history. And lets make sure the
+Help me build a browser/client abstraction.
+
+
+The existing implementation of the `TupleCache` seems like the underlying primitive on the client.
+
+Lets make the assumption that the client (again, focusing on the browser), can only subscribe to data that's in a syncDb. That said, I can imagine having data indexed into other subspaces on the client and otherwise cached for search. For example, if a client wants to search for a username, that might be a standalone api endpoint and that data may get cached on the client with some TTL invalidation strategy. This data isnt "synced" and but it is cached.
+
+Lets focus on the sycnDbs for now though. In fact, TodoMVC is probably the simplest place to start thinking about this because there's no need for "searching for usernames". Search is a unique problem solved separately. There are two strategies for TodoMVC.
+1. A user's syncDb contains all of the todo lists.
+2. Each todo list gets its own syncDb and the user's syncDb simply references those other todo lists.
+
+I think we should think about how both of those situations work. The first approach is probably the simplest and most pragmatic, though the second example is a bit more general purpose and serves as a nice example for how to do writes across multiple syncdbs at once.
+
+At the end of the day, we're going to be rendering with React, so we can start with those hooks and work backwards...
+
+```tsx
+function TodoList(props: {id: string}) {
+	const [filter, setFilter] = useState<"all"| "checked" | "unchecked">("all")
+
+	const todoList = useSyncDb(cache, ["todoList", props.id]) // subscribe to clock key from server pubsub.
+	const {local, remote} = useList(todoList.subspace([filter]), {limit: 20}) // subscribe to data range, fetch, and keep in sync
+
+	if (local.miss) return <div>Loading...</div>
+	const todos = local.hit || local.prefix
+
+// Assuming the indexes have a null value and a todoId at the end:
+	// ["all", order, todoId]
+	// ["checked", order, todoId]
+	// ["unchecked", order, todoId]
+
+	const todoIds = todos.map(({key}) => key.at(-1))
+
+	return <div>{todoIds.map(todoId => <Todo listId={props.id} todoId={todoId}/>)</div>
+}
+```
+
+In that example, `useSyncDb` gets a path. Using a global cache, it checks if we have that data in there. It subscribe to changes from the server via pubsub and subscribes to changes within the cache locally too. It fetches data if it doesnt exist and inserts it into the cache.
+
+```tsx
+function Todo(props: {listId, todoId}) {
+
+	const todoList = useSyncDb(cache, ["todoList", props.listId])
+	const {local, remote} = useGet(todoList, ["todo", props.todoId])
+	if (!local) return <div>Loading...</div>
+	// Note: we could throw remote as well if we wanted to use Suspense since remote is a promise.
+	const todoItem = local
+
+	// These appReducers help with types for the write function, but they also contain the logic for
+	// optimistic updates. It's assumed here that appReducers will look at which list the todoItem belongs to
+	// and call the todoReducers on that syncDb.
+
+	const setChecked = (checked: boolean) =>
+		write(cache, appReducers, {
+			id: randomId()
+			createdAt: new Date().toISOString(),
+			ops: [{fn: "set", args: [{...todoItem, checked}]}]
+		})
+
+	return <div>...</div>
+}
+```
+
+It's important that the write method here isn't on the syncDb using to todoReducers... It's very tempting to do that though but that short circuits things and makes it challenging to do transactional commits across multiple syncDbs.
+
+Lets assume right now the schema looks something like
+
+```ts
+["user", userId, "clock"]
+["user", userId, "history"]
+["user", userId, "data", "todoList", "list", order, listId]
+["user", userId, "data", "todoList", "map", listId, order]
+
+
+["todoList", listId, "clock"]
+["todoList", listId, "history"]
+["todoList", listId, "data"]: TodoList (just a name for now)
+["todoList", listId, "data", "todo", id]: Todo
+// I can imagine order in this case is just the most recent editedAt time just to keep things simple.
+["todoList", listId, "data", "all", order, id]
+["todoList", listId, "data", "checked", order, id]
+["todoList", listId, "data", "unchecked", order, id]
+```
+
+So there's a "syncDb" at `["user", userId]` and at some point we can imagine a "hashList" abstraction at `["user", userId, "data", "todoList"]` within the user's syncDb which uses fractional indexing to insert items.
+
+
+```ts
+const appReducers = {
+	newList(tx: TupleDb, commit: CommitMeta, id: string, name: string) {
+		if (!commit.authorId) throw new AuthorizationError("You need to be logged in.")
+
+		const userDb = tx.subspace(["user", commit.authorId])
+
+		const [{key}] = userDb.subspace(["todoLists", "list"]).list({limit: 1})
+		const order = generateKeyBetween(null, key[0]) // using npm "fractional-indexing" package
+
+		writeSyncDb(userDb, userReducers, {...commit, ops: [
+			{fn: "insertList", args: [order, id]}
+		]})
+
+		const listDb = tx.subspace(["todoList", id])
+		writeSyncDb(listDb, todoListReducers, {...commit, ops: [
+			{fn: "createList", args: [{id, name}]}
+		]})
+
+		publish(tx, ["user", commit.authorId])
+		publish(tx, ["todoList", id])
+	}
+	// ...
+}
+```
+
+Just to recap whats going on there... Clients can create a new todo list. Its going to use the commit author to determine who the list belongs to. It's going to insert the list into the user's syncDb, and its also going to create the list object in the list syncDb so we have the name of the list saved for the todoList record. So using the app-level commit operations, we're able to write to both sync dbs in the same transaction.
+
+Lists are a challenge in themselves with tupleDb and I hinted at some abstractions we could use later. But for now, lets keep it simple.
+
+I think this client side api could use a bit of massaging but its mostly there in terms of the API.
+
+Lets get a little more detailed on the read path and the write path.
+
+## Read Path
+
+Inside `useSyncDb`, we're going to subscribe to that syncDb path's clock over pubsub. Since we might have multiple components subscribed to the same path, we just need to reference count and only unsubscribe once the reference gets back down to zero.
+
+```ts
+useEffect(() => {
+	subscriptions.inc(path)
+	return () => subscriptions.dec(path)
+}, [path])
+```
+
+Then inside `useList` we're going to read from the local cache to see if that data is there in range returning {hit, miss, prefix} type. If the local result isnt `hit` then we're going to fire an api request to retrieve that range from the server and put it into the cache using `cache.insert`. Meanwhile we're going to use `cache.subscribe` to subscribe to the local cache value of that range so that the UI can update automatically when the result responds.
+
+NOTE: when we call `api.list` to get the data range, we also need to get the clock value for that syncDb so that we can be up to date on history to make sure everything is consistent.
+
+When we call useList, the range that we record that we're listening should have a reference count as well so we can clear out ranges we no longer care about once the reference on a range drops to zero.
+
+## Write Path
+
+`write` needs to handle queueing up writes to the server. Writes should always be submitted in order so there should be a queue here. And one day when things work offline, that queue will get persisted. One day, we may consider throttling the writes into batches. But for now, we can keep that queue in memory.
+
+We want writes to be applied optimistically to the client cache immediately, then the server will process the writes. The server will emit a clock via pubsub, and various clients will sync those changes. As for the client that made the write, it can call sync immediately after the write to get updated history state.
+
+The client needs to keep track of which transactions are yet to be written, the clock for the data that's come from the server, and a layer on top with all the optimistic changes. So when we get a clock update, we should compare that clock with the synced underlying database, not the optimsitic layer on top. We can then fetch whatever history we're missing, apply those changes locally, discard any writes outside the currently subscribed ranges, then we can use the transation id to figure out what what remaining transactions are still to be applied on top optimistically and have yet to be synced. This part is a bit tricky and could use a more detailed description and analysis for how it works.xw
+
+Something to clarify about the above situation. When we write on the server, the publish record tells us what clocks just updates on account of that transaction. Those clock updates can be returned by the request so the client knows exactly what syncDbs to sync.
+
+# Improvement: Waterfall Fetching
+
+It's common in frontend heavy applications like this that we end up doing a lot of fetching of lists and then mapping over those lists to fetch the items. The classic N+1 waterfall. This probably isn't such a big deal if we thoughtfully fetch data ahead of time. But an elegant way of dealing with this is to create custom API endpoints that return a set of data ranges that you can insert wholesale into the cache. This is the purpose of the ReadCache (already implemented). The api can just return the list args and the results and then the client just needs to insert them. Pretty simple.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

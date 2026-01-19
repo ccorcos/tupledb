@@ -4,97 +4,193 @@ import { describe, it } from "node:test"
 import { appDb, publish } from "../SyncNode"
 import { tupleDb } from "../../tupleDb/TupleDb"
 import { Tuple, TupleDb } from "../../tupleDb/types"
-import { Message, messagingAppReducers } from "./Messaging"
+import { Message, User, messagingAppReducers } from "./Messaging"
+import { Commit } from "../types"
 
-function server() {
+// ============================================================================
+// Test Helpers
+// ============================================================================
+
+function createServer() {
 	const db = tupleDb()
 	const pubsub = new PubsubHarness()
 	const app = appDb(db, messagingAppReducers)
-	const api = {
-		list: app.list,
+
+	return {
+		db,
 		write(args: Parameters<typeof app.write>[0]) {
 			app.write(args)
 			publish(db, pubsub)
 		},
 	}
-	return { db, api }
 }
 
-function getServerData(db: TupleDb, scope: Tuple): { key: Tuple; value: any }[] {
+/** Get data from a sync node's data subspace */
+function getData(db: TupleDb, scope: Tuple): { key: Tuple; value: any }[] {
 	return db.subspace([...scope, "data"]).list()
 }
 
-describe("Messaging App", () => {
-	describe("Server-side operations", () => {
-		it("creates a user profile", () => {
-			const { db, api } = server()
+/** Get history from a sync node */
+function getHistory(db: TupleDb, scope: Tuple): Commit[] {
+	return db
+		.subspace([...scope, "history"])
+		.list()
+		.map(({ value }) => value as Commit)
+}
 
-			api.write({
+// ============================================================================
+// Builder Helpers - Fluent API for creating test data
+// ============================================================================
+
+let idCounter = 0
+function nextId(prefix: string = "id"): string {
+	return `${prefix}-${++idCounter}`
+}
+
+function resetIds() {
+	idCounter = 0
+}
+
+function createUser(overrides: Partial<User> = {}): User {
+	return {
+		type: "user",
+		id: nextId("user"),
+		name: "Test User",
+		...overrides,
+	}
+}
+
+function createMessage(from: string, to: string[], overrides: Partial<Message> = {}): Message {
+	return {
+		type: "message",
+		id: nextId("msg"),
+		from,
+		to,
+		datetime: new Date().toISOString(),
+		body: "Test message",
+		...overrides,
+	}
+}
+
+// ============================================================================
+// Query Helpers - Clean accessors for test assertions
+// ============================================================================
+
+function getProfile(db: TupleDb, userId: string): User | undefined {
+	const data = getData(db, ["users", userId])
+	const entry = data.find((d) => d.key[0] === "profile")
+	return entry?.value as User | undefined
+}
+
+function getInbox(db: TupleDb, userId: string): string[] {
+	const data = getData(db, ["users", userId])
+	return data.filter((d) => d.key[0] === "inbox").map((d) => d.key[2] as string)
+}
+
+function getInboxByDatetime(db: TupleDb, userId: string): { datetime: string; msgId: string }[] {
+	const data = getData(db, ["users", userId])
+	return data
+		.filter((d) => d.key[0] === "inbox")
+		.map((d) => ({ datetime: d.key[1] as string, msgId: d.key[2] as string }))
+		.sort((a, b) => a.datetime.localeCompare(b.datetime))
+}
+
+function getOutbox(db: TupleDb, userId: string): string[] {
+	const data = getData(db, ["users", userId])
+	return data.filter((d) => d.key[0] === "outbox").map((d) => d.key[2] as string)
+}
+
+function getMessages(db: TupleDb, userId: string): Message[] {
+	const data = getData(db, ["users", userId])
+	return data.filter((d) => d.key[0] === "message").map((d) => d.value as Message)
+}
+
+function getMessageById(db: TupleDb, userId: string, msgId: string): Message | undefined {
+	const data = getData(db, ["users", userId])
+	const entry = data.find((d) => d.key[0] === "message" && d.key[1] === msgId)
+	return entry?.value as Message | undefined
+}
+
+function getUnread(db: TupleDb, userId: string): string[] {
+	const data = getData(db, ["users", userId])
+	return data.filter((d) => d.key[0] === "unread").map((d) => d.key[2] as string)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+describe("Messaging App", () => {
+	describe("User Operations", () => {
+		it("creates a user profile", () => {
+			resetIds()
+			const { db, write } = createServer()
+
+			write({
 				ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice Smith" }] }],
 			})
 
-			const userData = getServerData(db, ["users", "alice"])
-			const profile = userData.find((d) => d.key[0] === "profile")
+			const profile = getProfile(db, "alice")
 			assert.ok(profile)
-			assert.deepEqual(profile.value, { type: "user", id: "alice", name: "Alice Smith" })
+			assert.equal(profile.id, "alice")
+			assert.equal(profile.name, "Alice Smith")
 		})
 
+		it("updates a user profile", () => {
+			resetIds()
+			const { db, write } = createServer()
+
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice Smith" }] }] })
+
+			const profile = getProfile(db, "alice")
+			assert.equal(profile?.name, "Alice Smith")
+		})
+	})
+
+	describe("Message Operations", () => {
 		it("sends a message - appears in sender outbox and recipient inbox", () => {
-			const { db, api } = server()
+			resetIds()
+			const { db, write } = createServer()
 
-			// Create users
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
 
-			// Send message
-			const msg: Message = {
-				type: "message",
+			const msg = createMessage("alice", ["bob"], {
 				id: "msg1",
-				from: "alice",
-				to: ["bob"],
-				datetime: "2024-01-15T10:00:00Z",
 				body: "Hello Bob!",
-			}
+				datetime: "2024-01-15T10:00:00Z",
+			})
+			write({ ops: [{ fn: "set", args: [msg] }] })
 
-			api.write({ ops: [{ fn: "set", args: [msg] }] })
+			// Sender has message in outbox
+			assert.deepEqual(getOutbox(db, "alice"), ["msg1"])
+			assert.deepEqual(getInbox(db, "alice"), [])
 
-			// Check alice's outbox
-			const aliceData = getServerData(db, ["users", "alice"])
-			const aliceOutbox = aliceData.filter((d) => d.key[0] === "outbox")
-			assert.equal(aliceOutbox.length, 1)
-			assert.equal(aliceOutbox[0].key[2], "msg1")
+			// Recipient has message in inbox
+			assert.deepEqual(getInbox(db, "bob"), ["msg1"])
+			assert.deepEqual(getOutbox(db, "bob"), [])
 
-			// Check alice has message stored
-			const aliceMsg = aliceData.find((d) => d.key[0] === "message" && d.key[1] === "msg1")
-			assert.ok(aliceMsg)
-			assert.equal(aliceMsg.value.body, "Hello Bob!")
+			// Both have the message stored
+			const aliceMsg = getMessageById(db, "alice", "msg1")
+			const bobMsg = getMessageById(db, "bob", "msg1")
+			assert.equal(aliceMsg?.body, "Hello Bob!")
+			assert.equal(bobMsg?.body, "Hello Bob!")
 
-			// Check bob's inbox
-			const bobData = getServerData(db, ["users", "bob"])
-			const bobInbox = bobData.filter((d) => d.key[0] === "inbox")
-			assert.equal(bobInbox.length, 1)
-			assert.equal(bobInbox[0].key[2], "msg1")
-
-			// Check bob has message stored
-			const bobMsg = bobData.find((d) => d.key[0] === "message" && d.key[1] === "msg1")
-			assert.ok(bobMsg)
-			assert.equal(bobMsg.value.body, "Hello Bob!")
-
-			// Check bob has unread marker
-			const bobUnread = bobData.filter((d) => d.key[0] === "unread")
-			assert.equal(bobUnread.length, 1)
+			// Recipient has unread marker
+			assert.deepEqual(getUnread(db, "bob"), ["msg1"])
+			assert.deepEqual(getUnread(db, "alice"), [])
 		})
 
 		it("sends message to multiple recipients", () => {
-			const { db, api } = server()
+			resetIds()
+			const { db, write } = createServer()
 
-			// Create users
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "charlie", name: "Charlie" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "charlie", name: "Charlie" }] }] })
 
-			// Send message to bob and charlie
-			api.write({
+			write({
 				ops: [
 					{
 						fn: "sendMessage",
@@ -103,130 +199,106 @@ describe("Messaging App", () => {
 				],
 			})
 
-			// Verify all three users have the message
+			// All three users have the message
 			for (const userId of ["alice", "bob", "charlie"]) {
-				const userData = getServerData(db, ["users", userId])
-				const msg = userData.find((d) => d.key[0] === "message" && d.key[1] === "msg1")
-				assert.ok(msg, `${userId} should have the message`)
+				assert.ok(getMessageById(db, userId, "msg1"), `${userId} should have the message`)
 			}
 
-			// alice has outbox entry
-			const aliceData = getServerData(db, ["users", "alice"])
-			assert.equal(aliceData.filter((d) => d.key[0] === "outbox").length, 1)
-			assert.equal(aliceData.filter((d) => d.key[0] === "inbox").length, 0)
+			// Sender has outbox, recipients have inbox
+			assert.equal(getOutbox(db, "alice").length, 1)
+			assert.equal(getInbox(db, "alice").length, 0)
 
-			// bob and charlie have inbox entries
 			for (const userId of ["bob", "charlie"]) {
-				const userData = getServerData(db, ["users", userId])
-				assert.equal(
-					userData.filter((d) => d.key[0] === "inbox").length,
-					1,
-					`${userId} should have inbox entry`
-				)
-				assert.equal(
-					userData.filter((d) => d.key[0] === "outbox").length,
-					0,
-					`${userId} should not have outbox entry`
-				)
+				assert.equal(getInbox(db, userId).length, 1, `${userId} should have inbox entry`)
+				assert.equal(getOutbox(db, userId).length, 0, `${userId} should not have outbox entry`)
 			}
 		})
 
 		it("marks message as read", () => {
-			const { db, api } = server()
+			resetIds()
+			const { db, write } = createServer()
 
-			// Setup
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
-			api.write({
-				ops: [
-					{
-						fn: "sendMessage",
-						args: [{ id: "msg1", from: "alice", to: ["bob"], body: "Hello!" }],
-					},
-				],
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({
+				ops: [{ fn: "sendMessage", args: [{ id: "msg1", from: "alice", to: ["bob"], body: "Hello!" }] }],
 			})
 
 			// Bob has unread
-			let bobData = getServerData(db, ["users", "bob"])
-			assert.equal(bobData.filter((d) => d.key[0] === "unread").length, 1)
+			assert.deepEqual(getUnread(db, "bob"), ["msg1"])
 
 			// Mark as read
-			api.write({
-				ops: [{ fn: "markRead", args: [{ messageId: "msg1", userId: "bob" }] }],
-			})
+			write({ ops: [{ fn: "markRead", args: [{ messageId: "msg1", userId: "bob" }] }] })
 
 			// Bob no longer has unread
-			bobData = getServerData(db, ["users", "bob"])
-			assert.equal(bobData.filter((d) => d.key[0] === "unread").length, 0)
+			assert.deepEqual(getUnread(db, "bob"), [])
 
 			// Message still exists
-			const msg = bobData.find((d) => d.key[0] === "message" && d.key[1] === "msg1")
-			assert.ok(msg)
+			assert.ok(getMessageById(db, "bob", "msg1"))
 		})
 
 		it("deletes message from user scope only", () => {
-			const { db, api } = server()
+			resetIds()
+			const { db, write } = createServer()
 
-			// Setup
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
-			api.write({
-				ops: [
-					{
-						fn: "sendMessage",
-						args: [{ id: "msg1", from: "alice", to: ["bob"], body: "Hello!" }],
-					},
-				],
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({
+				ops: [{ fn: "sendMessage", args: [{ id: "msg1", from: "alice", to: ["bob"], body: "Hello!" }] }],
 			})
 
 			// Both have message
-			assert.ok(
-				getServerData(db, ["users", "alice"]).find(
-					(d) => d.key[0] === "message" && d.key[1] === "msg1"
-				)
-			)
-			assert.ok(
-				getServerData(db, ["users", "bob"]).find(
-					(d) => d.key[0] === "message" && d.key[1] === "msg1"
-				)
-			)
+			assert.ok(getMessageById(db, "alice", "msg1"))
+			assert.ok(getMessageById(db, "bob", "msg1"))
 
 			// Bob deletes message
-			api.write({
-				ops: [{ fn: "delete", args: [{ type: "message", id: "msg1", userId: "bob" }] }],
-			})
+			write({ ops: [{ fn: "delete", args: [{ type: "message", id: "msg1", userId: "bob" }] }] })
 
-			// Alice still has message
-			assert.ok(
-				getServerData(db, ["users", "alice"]).find(
-					(d) => d.key[0] === "message" && d.key[1] === "msg1"
-				)
-			)
-
-			// Bob no longer has message
-			assert.ok(
-				!getServerData(db, ["users", "bob"]).find(
-					(d) => d.key[0] === "message" && d.key[1] === "msg1"
-				)
-			)
-			assert.ok(
-				!getServerData(db, ["users", "bob"]).find(
-					(d) => d.key[0] === "inbox" && d.key[2] === "msg1"
-				)
-			)
+			// Alice still has message, Bob doesn't
+			assert.ok(getMessageById(db, "alice", "msg1"))
+			assert.ok(!getMessageById(db, "bob", "msg1"))
+			assert.equal(getInbox(db, "bob").length, 0)
 		})
 	})
 
-	describe("Complex scenarios", () => {
-		it("conversation thread with multiple back-and-forth messages", () => {
-			const { db, api } = server()
+	describe("Message Ordering", () => {
+		it("messages ordered by datetime in inbox", () => {
+			resetIds()
+			const { db, write } = createServer()
 
-			// Setup users
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+
+			// Send messages out of order
+			const messages: Message[] = [
+				createMessage("alice", ["bob"], { id: "msg3", datetime: "2024-01-15T12:00:00Z", body: "Third" }),
+				createMessage("alice", ["bob"], { id: "msg1", datetime: "2024-01-15T10:00:00Z", body: "First" }),
+				createMessage("alice", ["bob"], { id: "msg2", datetime: "2024-01-15T11:00:00Z", body: "Second" }),
+			]
+
+			for (const msg of messages) {
+				write({ ops: [{ fn: "set", args: [msg] }] })
+			}
+
+			// Bob's inbox should be ordered by datetime
+			const inbox = getInboxByDatetime(db, "bob")
+			assert.equal(inbox.length, 3)
+			assert.equal(inbox[0].msgId, "msg1") // First (earliest)
+			assert.equal(inbox[1].msgId, "msg2") // Second
+			assert.equal(inbox[2].msgId, "msg3") // Third (latest)
+		})
+	})
+
+	describe("Conversations", () => {
+		it("conversation thread with multiple back-and-forth messages", () => {
+			resetIds()
+			const { db, write } = createServer()
+
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
 
 			// Conversation
-			const messages = [
+			const conversation = [
 				{ from: "alice", to: ["bob"], body: "Hi Bob!" },
 				{ from: "bob", to: ["alice"], body: "Hey Alice!" },
 				{ from: "alice", to: ["bob"], body: "How are you?" },
@@ -234,157 +306,137 @@ describe("Messaging App", () => {
 				{ from: "alice", to: ["bob"], body: "Great!" },
 			]
 
-			for (let i = 0; i < messages.length; i++) {
-				api.write({
-					ops: [
-						{
-							fn: "sendMessage",
-							args: [{ id: `msg${i}`, ...messages[i] }],
-						},
-					],
-				})
+			for (let i = 0; i < conversation.length; i++) {
+				write({ ops: [{ fn: "sendMessage", args: [{ id: `msg${i}`, ...conversation[i] }] }] })
 			}
 
-			// Verify totals
-			const aliceData = getServerData(db, ["users", "alice"])
-			const bobData = getServerData(db, ["users", "bob"])
-
 			// Alice sent 3 messages, received 2
-			assert.equal(aliceData.filter((d) => d.key[0] === "outbox").length, 3)
-			assert.equal(aliceData.filter((d) => d.key[0] === "inbox").length, 2)
-			assert.equal(aliceData.filter((d) => d.key[0] === "message").length, 5)
+			assert.equal(getOutbox(db, "alice").length, 3)
+			assert.equal(getInbox(db, "alice").length, 2)
+			assert.equal(getMessages(db, "alice").length, 5)
 
 			// Bob sent 2 messages, received 3
-			assert.equal(bobData.filter((d) => d.key[0] === "outbox").length, 2)
-			assert.equal(bobData.filter((d) => d.key[0] === "inbox").length, 3)
-			assert.equal(bobData.filter((d) => d.key[0] === "message").length, 5)
+			assert.equal(getOutbox(db, "bob").length, 2)
+			assert.equal(getInbox(db, "bob").length, 3)
+			assert.equal(getMessages(db, "bob").length, 5)
 		})
 
 		it("group message to multiple recipients", () => {
-			const { db, api } = server()
+			resetIds()
+			const { db, write } = createServer()
 
-			// Setup users
 			const users = ["alice", "bob", "charlie", "diana"]
 			for (const userId of users) {
-				api.write({
-					ops: [
-						{
-							fn: "createUser",
-							args: [{ id: userId, name: userId.charAt(0).toUpperCase() + userId.slice(1) }],
-						},
-					],
+				write({
+					ops: [{ fn: "createUser", args: [{ id: userId, name: userId.charAt(0).toUpperCase() + userId.slice(1) }] }],
 				})
 			}
 
-			// Alice sends group message
-			api.write({
+			write({
 				ops: [
 					{
 						fn: "sendMessage",
-						args: [{
-							id: "group-msg",
-							from: "alice",
-							to: ["bob", "charlie", "diana"],
-							body: "Group announcement!",
-						}],
+						args: [{ id: "group-msg", from: "alice", to: ["bob", "charlie", "diana"], body: "Group announcement!" }],
 					},
 				],
 			})
 
-			// Alice has outbox entry
-			const aliceData = getServerData(db, ["users", "alice"])
-			assert.equal(aliceData.filter((d) => d.key[0] === "outbox").length, 1)
-			assert.equal(aliceData.filter((d) => d.key[0] === "inbox").length, 0)
+			// Sender has outbox, no inbox
+			assert.equal(getOutbox(db, "alice").length, 1)
+			assert.equal(getInbox(db, "alice").length, 0)
 
-			// All recipients have inbox entries
+			// All recipients have inbox and unread
 			for (const userId of ["bob", "charlie", "diana"]) {
-				const userData = getServerData(db, ["users", userId])
-				assert.equal(
-					userData.filter((d) => d.key[0] === "inbox").length,
-					1,
-					`${userId} should have 1 inbox entry`
-				)
-				assert.equal(
-					userData.filter((d) => d.key[0] === "unread").length,
-					1,
-					`${userId} should have 1 unread entry`
-				)
+				assert.equal(getInbox(db, userId).length, 1, `${userId} should have 1 inbox entry`)
+				assert.equal(getUnread(db, userId).length, 1, `${userId} should have 1 unread entry`)
 			}
 		})
+	})
 
-		it("idempotent message sending", () => {
-			const { db, api } = server()
+	describe("History Tracking", () => {
+		it("records operations in history with correct clock sequence", () => {
+			resetIds()
+			const { db, write } = createServer()
 
-			// Setup
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({ ops: [{ fn: "sendMessage", args: [{ id: "msg1", from: "alice", to: ["bob"], body: "Hello!" }] }] })
+			write({ ops: [{ fn: "sendMessage", args: [{ id: "msg2", from: "bob", to: ["alice"], body: "Hi!" }] }] })
 
-			// Send same message twice with same id
-			const msg = {
-				id: "msg1",
-				from: "alice",
-				to: ["bob"],
-				body: "Hello!",
-			}
+			// Alice's history: profile, sendMessage, receiveMessage
+			const aliceHistory = getHistory(db, ["users", "alice"])
+			assert.equal(aliceHistory.length, 3)
+			assert.equal(aliceHistory[0].clock, 1)
+			assert.equal(aliceHistory[1].clock, 2)
+			assert.equal(aliceHistory[2].clock, 3)
 
-			api.write({ id: "tx-send", ops: [{ fn: "sendMessage", args: [msg] }] })
-			api.write({ id: "tx-send", ops: [{ fn: "sendMessage", args: [msg] }] }) // Duplicate
+			// Verify operation types
+			assert.equal(aliceHistory[0].ops[0].fn, "setProfile")
+			assert.equal(aliceHistory[1].ops[0].fn, "sendMessage")
+			assert.equal(aliceHistory[2].ops[0].fn, "receiveMessage")
+		})
+
+		it("maintains separate history per user scope", () => {
+			resetIds()
+			const { db, write } = createServer()
+
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({ ops: [{ fn: "sendMessage", args: [{ id: "msg1", from: "alice", to: ["bob"], body: "Hello!" }] }] })
+
+			const aliceHistory = getHistory(db, ["users", "alice"])
+			const bobHistory = getHistory(db, ["users", "bob"])
+
+			// Alice: profile + sendMessage
+			assert.equal(aliceHistory.length, 2)
+
+			// Bob: profile + receiveMessage + addUnread (in same commit)
+			assert.equal(bobHistory.length, 2)
+			assert.equal(bobHistory[1].ops.length, 2) // receiveMessage and addUnread
+		})
+	})
+
+	describe("Edge Cases", () => {
+		it("idempotent message sending with same commit id", () => {
+			resetIds()
+			const { db, write } = createServer()
+
+			write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+
+			const msg = { id: "msg1", from: "alice", to: ["bob"], body: "Hello!" }
+
+			// Send same commit twice
+			write({ id: "tx-send", ops: [{ fn: "sendMessage", args: [msg] }] })
+			write({ id: "tx-send", ops: [{ fn: "sendMessage", args: [msg] }] })
 
 			// Should only have one message
-			const bobData = getServerData(db, ["users", "bob"])
-			assert.equal(bobData.filter((d) => d.key[0] === "inbox").length, 1)
-			assert.equal(bobData.filter((d) => d.key[0] === "message").length, 1)
+			assert.equal(getInbox(db, "bob").length, 1)
+			assert.equal(getMessages(db, "bob").length, 1)
 		})
 
-		it("messages ordered by datetime", () => {
-			const { db, api } = server()
+		it("handles marking non-existent message as read gracefully", () => {
+			resetIds()
+			const { db, write } = createServer()
 
-			// Setup
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "alice", name: "Alice" }] }] })
-			api.write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
 
-			// Send messages with specific datetimes (out of order)
-			const messages: Message[] = [
-				{
-					type: "message",
-					id: "msg3",
-					from: "alice",
-					to: ["bob"],
-					datetime: "2024-01-15T12:00:00Z",
-					body: "Third",
-				},
-				{
-					type: "message",
-					id: "msg1",
-					from: "alice",
-					to: ["bob"],
-					datetime: "2024-01-15T10:00:00Z",
-					body: "First",
-				},
-				{
-					type: "message",
-					id: "msg2",
-					from: "alice",
-					to: ["bob"],
-					datetime: "2024-01-15T11:00:00Z",
-					body: "Second",
-				},
-			]
+			// Mark non-existent message as read - should not throw
+			write({ ops: [{ fn: "markRead", args: [{ messageId: "nonexistent", userId: "bob" }] }] })
 
-			for (let i = 0; i < messages.length; i++) {
-				api.write({ ops: [{ fn: "set", args: [messages[i]] }] })
-			}
+			assert.deepEqual(getUnread(db, "bob"), [])
+		})
 
-			// Check Bob's inbox is ordered by datetime
-			const bobData = getServerData(db, ["users", "bob"])
-			const inboxEntries = bobData
-				.filter((d) => d.key[0] === "inbox")
-				.sort((a, b) => (a.key[1] as string).localeCompare(b.key[1] as string))
+		it("handles deleting non-existent message gracefully", () => {
+			resetIds()
+			const { db, write } = createServer()
 
-			assert.equal(inboxEntries.length, 3)
-			assert.equal(inboxEntries[0].key[2], "msg1") // First (earliest datetime)
-			assert.equal(inboxEntries[1].key[2], "msg2") // Second
-			assert.equal(inboxEntries[2].key[2], "msg3") // Third (latest datetime)
+			write({ ops: [{ fn: "createUser", args: [{ id: "bob", name: "Bob" }] }] })
+
+			// Delete non-existent message - should not throw
+			write({ ops: [{ fn: "delete", args: [{ type: "message", id: "nonexistent", userId: "bob" }] }] })
+
+			assert.equal(getMessages(db, "bob").length, 0)
 		})
 	})
 })
