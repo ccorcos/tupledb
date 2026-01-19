@@ -1,125 +1,52 @@
-import { ListArgs, ReadOnlyTupleDb, Tuple, TupleDb, WriteArgs } from "../tupleDb/types"
+import { TupleDb } from "../tupleDb/types"
 
 export type JSONValue = any
 
-// ==========================================================================
-// SyncDb Types
-// ==========================================================================
-
-export type Reducer = (tx: TupleDb, ...args: any[]) => void
+/**
+ * A reducer function that handles an operation.
+ * Receives the transaction, commit metadata (for authorization), and operation args.
+ */
+export type Reducer = (tx: TupleDb, commit: CommitMeta, ...args: any[]) => void
 export type ReducerMap = Record<string, Reducer>
 
-// Helper to extract args parameters (dropping the first 'tx' argument)
-type ReducerArgs<F extends Reducer> = F extends (tx: any, ...args: infer A) => any ? A : never
+// Helper to extract args parameters (dropping the first 'tx' and 'commit' arguments)
+type ReducerArgs<F extends Reducer> = F extends (tx: any, commit: any, ...args: infer A) => any
+	? A
+	: never
 
-export type Op<R extends ReducerMap = any> = {
-	fn: keyof R
-	args: ReducerArgs<R[keyof R]>
-}
+export type Op<R extends ReducerMap = ReducerMap> = {
+	[K in keyof R]: {
+		fn: K
+		args: ReducerArgs<R[K]>
+	}
+}[keyof R]
 
-export type OpsBuilder<R extends ReducerMap> = {
-	[K in keyof R]: (...args: ReducerArgs<R[K]>) => void
-}
-
-export type CommitMeta = {
+/**
+ * Input for creating a commit (what the client provides).
+ */
+export type CommitArgs<R extends ReducerMap = ReducerMap> = {
 	id?: string
 	authorId?: string
 	createdAt?: string
-}
-
-export type CommitArgs<R extends ReducerMap = ReducerMap> = CommitMeta & {
 	ops: Op<R>[]
 }
 
-export type Commit<R extends ReducerMap = ReducerMap> = {
+/**
+ * Metadata passed to reducers when a commit is applied.
+ * The id is always present because the server assigns one if not provided.
+ */
+export type CommitMeta = {
 	id: string
-	authorId?: string // Used for authorization.
-	createdAt: string // ISO string when the client created it
+	authorId?: string
+	createdAt?: string
+	commitedAt?: string // Written on the server but not the client.
+}
+
+/**
+ * A fully-formed commit as stored in history (what the server produces).
+ * Includes server-assigned clock.
+ */
+export type Commit<R extends ReducerMap = ReducerMap> = CommitMeta & {
 	clock: number
-	commitedAt: string // ISO string when the server wrote it to the database
 	ops: Op<R>[]
-}
-
-export type SyncDb<R extends ReducerMap> = {
-	clock: () => number
-	history: ReadOnlyTupleDb
-	data: ReadOnlyTupleDb
-	write: {
-		(commit: CommitArgs<R> | Commit<R>): Commit<R>
-		(meta: CommitMeta, build: (ops: OpsBuilder<R>) => void): Commit<R>
-		(build: (ops: OpsBuilder<R>) => void): Commit<R>
-	}
-}
-
-// ==========================================================================
-// SyncDbClient Types
-// ==========================================================================
-
-export interface ISyncClient<GlobalReducers extends ReducerMap> {
-	syncDb<R extends ReducerMap>(prefix: Tuple, reducers: R): IClientSyncDb<R>
-	write(meta: CommitMeta, build: (ops: OpsBuilder<GlobalReducers>) => void): void
-}
-
-export interface IClientSyncDb<R extends ReducerMap> {
-	clock: () => number
-	data: ReadOnlyTupleDb & {
-		subscribe: (
-			args: ListArgs<Tuple>,
-			listener: (result: { hit?: any[]; miss?: boolean; prefix?: any[] }) => void
-		) => SubscribeResult
-	}
-	history: {
-		list: (args?: ListArgs<Tuple>) => { key: Tuple; value: any }[]
-	}
-    write(meta: CommitMeta, build: (ops: OpsBuilder<R>) => void): void
-	// Write is now typically handled via the global client.write,
-	// but we might keep a convenience method or remove it.
-	// For this refactor, we focus on the global path.
-	sync: () => Promise<void>
-}
-
-export type PendingCommit<R extends ReducerMap> = {
-	commit: Commit<R>
-	cleanup: () => void
-	changes: WriteArgs<Tuple, JSONValue>
-}
-
-export type SubscribeResult = {
-	local: { hit?: any[]; miss?: boolean; prefix?: any[] }
-	remote: Promise<any[]>
-	unsubscribe: () => void
-}
-
-// ==========================================================================
-// SyncDb API Types
-// ==========================================================================
-
-// Explicit Sync Server API Responses
-
-// write() response
-export type WriteResult = {
-	clock: number
-}
-
-// fetch() response (updates only)
-export type FetchResult = {
-	clock: number
-	updates: Commit[]
-}
-
-// sync() response (write + fetch)
-export type SyncResult = FetchResult
-
-// read() response (fetch + data snapshot)
-export type ReadResult = FetchResult & {
-	data: { key: Tuple; value: any }[]
-}
-
-// Note: PubSub types are now in PubSub.ts
-
-export type SyncApi = {
-	write(scope: Tuple, commits: Commit[]): Promise<WriteResult>
-	fetch(scope: Tuple, sinceClock: number): Promise<FetchResult>
-	sync(scope: Tuple, commits: Commit[], syncedClock: number): Promise<SyncResult>
-	read(scope: Tuple, range: ListArgs<Tuple>, syncedClock: number): Promise<ReadResult>
 }

@@ -1,3 +1,19 @@
+
+HERE: HumanTodoMVC
+
+
+- make some simple tests for humantodomvc
+- get the client cache working along with sync and test it.
+
+
+
+
+
+
+
+
+---
+
 Create branches to experiment with new layers and implementations...
 
 - schema + ivm layer https://gemini.google.com/app/c7c41f3ae35e0b64
@@ -13,8 +29,6 @@ Gemini.md...
 - syncdb
 - recorddb
 - use a separate types files
-
-
 
 ---
 
@@ -33,6 +47,7 @@ We need to slow down and actually do some designing... Lets focus on some specs 
 - Social Feed
 
 Take it slow!
+
 
 
 

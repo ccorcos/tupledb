@@ -575,3 +575,30 @@ Please come up with a plan for how to implement all of this. Be explicit about t
 This all feels way off. Lets focus on the abstraction and the documentation and don't write any more code until we figure it out. Continue writing in the sync-examples.md file... The server is simple. Its a database, api, and pubsub. The database has a way of accpeting write operations, applying operations, publishing clocks, and an api for reading/writing. The client has a cache and the client developer experience should just be something as simple as getting a syncDb path from the cache and querying it. The response should say whether oits in the cache or not and fetch things in the background and reactively call the callback in the query saying there's changes. Clients should have to unsubscribe explicitly to free the reference counter from the cache. The cache also needs to handle optimistic updating by applying operations and keeping a queue of outbound writes to send to the server to reconcile.
 
 ---
+
+I've create cleaned up the src/syncDb abstractions and created an example HumanTodoMVC.test.ts
+
+@src/syncDb/examples/HumanTodoMVC.test.ts
+
+Please refactor to use those abstractions.
+
+I don't like the way src/fixtures/TestHarness.ts works because it's not using real abstractions that will be used in production. I like the HumanTodoMVC approach more.
+
+The FetchApi and the AppDb abstraction are be unified into a single api abstraction in HumanTodoMVC.
+
+SyncServer.ts seems unnecessary with the abstractions in HumanTodoMVC.
+
+It seems that the entire syncDb/SyncDb.ts abstraction is gone too and we're just going to use applySyncCommit.
+
+Please clean everything up to align with the abstractions in HumanTodoMVC.test.ts. Get rid of all the cruft. And make sure you address the following files as well:
+
+src/syncDb/SyncClient.test.ts
+src/syncDb/SyncClient.ts
+src/syncDb/SyncDb.test.ts
+src/syncDb/SyncDb.ts
+src/syncDb/examples/Messaging.test.ts
+src/syncDb/examples/Messaging.ts
+src/syncDb/examples/TodoMVC.test.ts
+src/syncDb/examples/TodoMVC.ts
+
+
