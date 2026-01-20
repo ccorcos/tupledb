@@ -5,20 +5,13 @@ HERE: HumanTodoMVC
 - make some simple tests for humantodomvc
 - get the client cache working along with sync and test it.
 
-
-- clarify language around syncDb and appDb...
-
-	- appdb, syncdb... how to use appDb without syncDb?
-
-- advice on the client... think through race conditions, etc.
-
-	The client needs to fetch data, cache ranges, react to changes in those ranges, optimistically update, queue client writes to set to the server tolerating temporary network disconnection while writing to the cache optimistically, subscribing to clock changes from the server and receiving history from the server, rebasing changes, etc.
+- add appdb and syncdb to readme/claude.md
 
 
+Include the appDb and syncDb abstractions in Readme.md, Claude.md, docs/getting-started.md and docs/architecture.md But don't worry about syncDb/client abstractions just yet.
 
-- human-spec, build the client.
 
-
+ScopeState
 
 
 

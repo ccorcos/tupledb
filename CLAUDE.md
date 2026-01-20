@@ -92,3 +92,4 @@ type TupleDb = TupleOkv & {
 - Use `node:test` and `node:assert` for testing
 - Do not use `git` commands unless explicitly directed
 - Ignore anything in TODO.md
+- Few / minimal comments

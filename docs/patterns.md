@@ -34,6 +34,8 @@ class Transaction<K, V> implements OkvTx<K, V> {
 }
 ```
 
+Avoid using private class methods when a a pure function could substitute.
+
 ### Use Functions When:
 
 Composing or transforming existing objects:

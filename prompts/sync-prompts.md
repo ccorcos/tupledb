@@ -607,3 +607,38 @@ Lets write some tests for src/examples/TodoMVC.ts Lets make sure to cover the fo
 
 Make sure your testing code is well factored and very readable. Use whatever helper functions and abstractions necessary to do a good job.
 
+---
+
+Help me think about the browser client abstractions that work with appDb/syncDb/syncServer.
+
+The client should have a TupleCache which stores all the data. But it needs to subscribe to syncDb clocks via pubsub abstraction (over a websocket eventually). It needs to write data optimistically to the local cache, as well as handle realtime updates from other users, and rebasing the optimistic changes...
+
+We can mock everything out with React and react hooks. I don't like using suspense though. I like the idea of returning local results from the cache, as well as a remote promise involved in any data fetching. This means you can use suspense if you want (though I don't like to).
+
+	const {local, remote} = useList(todoList.subspace([filter]), {limit: 20})
+
+Help me think through all the different pieces of this to think about, the hooks we'll need, and how to think about eventual consistency and make sure there aren't any problematic race conditions.
+
+---
+
+Pending writes should be in a separate queue outside of the cache and queued up to write to the syncServer. But the actual optimistic writes could live on top of the cache. It's unclear though...
+
+I don't actually like the way OkvCache write cleanup works so don't be married to that. Also look at Transaction and how that augments the results of a database as a way of applying things on top of without modifying the underlying database. Just a strategy to consider.
+
+Something that is important though, is that I should be able to query a syncDb's history in the local cache and see the optimistic writes. And I should be able to check if a write has been finalized to the server or not.
+
+---
+
+There are two different kinds of subscriptions going on here.
+
+A client subscribes to a syncDb path which listens to the clock via the syncServer.
+
+Inside that syncDb, the client subscribes to various ranges (data ranges and history ranges) in order to get the data they want to render. These subscriptions are only within the cache though so that when data updates in the cache (from sync, fetch, optimistic updates, etc.), the ui stays up to date.
+
+So when the client "subscribes" to a range, it will fetch data from the syncServer, and in the response, we need to make sure that we aren't creating a consistency nightmare with the current clock value that we know, etc.
+
+---
+
+Lets redesign the syncDb client to consolidate state in a single place. The TupleCache can hold all of the data across all the syncDbs, in the same layout that they exist on the backend. All writes should live in a single global queue as well since writes can operate against multiple syncDbs at once. Ideally we can use the same global reducers on the backend and the frontend.
+
+It's possible that what I'm asking for has some constraints that I'm not understanding so carefully think through the intention and how we could get close to it.
