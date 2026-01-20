@@ -1,10 +1,9 @@
 import { PubsubHarness } from "fixtures/PubsubHarness"
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
+import { syncServer } from "syncDb/syncServer"
 import { tupleDb } from "../../tupleDb/TupleDb"
 import { Tuple, TupleDb } from "../../tupleDb/types"
-import { appDb } from "../appDb"
-import { publish } from "../pubsubs"
 import { Commit } from "../types"
 import { Todo, todoAppReducers, TodoList } from "./TodoMVC"
 
@@ -15,14 +14,10 @@ import { Todo, todoAppReducers, TodoList } from "./TodoMVC"
 function createServer() {
 	const db = tupleDb()
 	const pubsub = new PubsubHarness()
-	const app = appDb(db, todoAppReducers)
-
+	const server = syncServer(db, pubsub, todoAppReducers)
 	return {
 		db,
-		write(args: Parameters<typeof app.write>[0]) {
-			app.write(args)
-			publish(db, pubsub)
-		},
+		write: server.write
 	}
 }
 

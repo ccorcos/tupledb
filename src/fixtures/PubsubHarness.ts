@@ -2,7 +2,7 @@
 // TODO Later:
 // - connect, disconnect, reconnect.
 
-import { PubsubClientApi, PubsubServerApi } from "syncDb/pubsubs"
+import { PubsubClientApi, PubsubServerApi } from "syncDb/pubsub"
 
 export class PubsubHarnessClient implements PubsubClientApi {
 	constructor(private server: {

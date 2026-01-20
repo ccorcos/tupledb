@@ -1,5 +1,4 @@
 import { randomId } from "../shared/randomId"
-import { tupleTx } from "../tupleDb/TupleDb"
 import { ListArgs, Tuple, TupleDb } from "../tupleDb/types"
 import { CommitArgs, CommitMeta, ReducerMap } from "./types"
 
@@ -14,13 +13,11 @@ export function appDb(db: TupleDb, reducers: ReducerMap) {
 		},
 
 		write(commit: CommitArgs) {
-			const tx = tupleTx(db)
-
 			const commitedAt = new Date().toISOString()
 
 			if (commit.id) {
-				if (tx.get(["_seen", commit.id])) return
-				tx.set(["_seen", commit.id], commitedAt)
+				if (db.get(["_seen", commit.id])) return
+				db.set(["_seen", commit.id], commitedAt)
 			}
 
 			const meta: CommitMeta = {
@@ -33,10 +30,9 @@ export function appDb(db: TupleDb, reducers: ReducerMap) {
 			for (const op of commit.ops) {
 				const reducer = reducers[op.fn]
 				if (!reducer) throw new Error(`Unknown operation: ${op.fn}`)
-				reducer(tx, meta, ...op.args)
+				reducer(db, meta, ...op.args)
 			}
 
-			tx.commit()
 		},
 	}
 }
