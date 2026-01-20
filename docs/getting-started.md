@@ -206,87 +206,122 @@ rdb.hasIndex({
 
 ## SyncDb: Replication
 
-SyncDb tracks history for sync/replication scenarios.
+SyncDb provides history tracking and clock-based synchronization for replication scenarios.
 
 ### Basic Usage
 
 ```typescript
-import { syncDb, defaultReducers } from "./src/syncDb/SyncDb"
+import { syncDb } from "./src/syncDb/syncDb"
+import { ReducerMap, CommitMeta } from "./src/syncDb/types"
 
-const sdb = syncDb(db.subspace(["user", "u1"]), defaultReducers)
+// Define reducers for your data
+const todoListReducers = {
+  setTodo: (tx: TupleDb, commit: CommitMeta, todo: Todo) => {
+    tx.set(["todo", todo.id], todo)
+    tx.set(["all", todo.order, todo.id], null)
+  },
+  deleteTodo: (tx: TupleDb, commit: CommitMeta, todoId: string) => {
+    const todo = tx.get(["todo", todoId])
+    if (!todo) return
+    tx.delete(["todo", todoId])
+    tx.delete(["all", todo.order, todoId])
+  }
+} satisfies ReducerMap
 
-// Write with history tracking
-sdb.write({ authorId: "u1" }, (ops) => {
-  ops.set(["profile"], { name: "Chet", bio: "Developer" })
-  ops.set(["settings", "theme"], "dark")
+// Create a scoped syncDb
+const sdb = syncDb(db.subspace(["todoList", listId]), todoListReducers)
+
+// Apply a commit (increments clock, stores in history, runs reducers)
+sdb.apply({
+  id: "commit-1",
+  authorId: "user-1",
+  ops: [{ fn: "setTodo", args: [todo] }]
 })
 
 // Read current clock
 const clock = sdb.clock()  // 1
 
 // Read history
-const history = sdb.history.list({ gte: [0] })
+const commits = sdb.history({ gte: [0] })
 // [{ key: [1], value: { id, authorId, clock, ops, ... } }]
 
-// Read data
-sdb.data.get(["profile"])  // { name: "Chet", bio: "Developer" }
+// Access data subspace
+sdb.data.get(["todo", todoId])
+sdb.data.list({ gte: ["all"], lt: ["all", null] })
 ```
 
-### Custom Reducers
+### Multi-Scope Reducers
+
+App-level reducers can fan out to multiple scoped syncDbs for cross-entity consistency:
 
 ```typescript
-type MessageReducers = {
-  sendMessage: (tx: TupleDb, msg: Message) => void
-  deleteMessage: (tx: TupleDb, id: string) => void
-}
+const todoAppReducers = {
+  setList: (tx: TupleDb, commit: CommitMeta, list: TodoList) => {
+    if (!commit.authorId) throw new Error("You need to be logged in.")
+    const userId = commit.authorId
 
-const messageReducers: MessageReducers = {
-  sendMessage: (tx, msg) => {
-    tx.set(["messages", msg.id], msg)
-    tx.set(["inbox", msg.createdAt, msg.id], null)
+    // Update user's list index (separate clock/history)
+    syncDb(tx.subspace(["users", userId]), userReducers).apply({
+      ...commit,
+      ops: [{ fn: "setList", args: [list] }]
+    })
+
+    // Update the list itself (separate clock/history)
+    syncDb(tx.subspace(["todoList", list.id]), todoListReducers).apply({
+      ...commit,
+      ops: [{ fn: "setList", args: [list] }]
+    })
   },
-  deleteMessage: (tx, id) => {
-    const msg = tx.get(["messages", id])
-    if (msg) {
-      tx.delete(["messages", id])
-      tx.delete(["inbox", msg.createdAt, id])
-    }
+
+  addTodo: (tx: TupleDb, commit: CommitMeta, todo: Todo) => {
+    syncDb(tx.subspace(["todoList", todo.listId]), todoListReducers).apply({
+      ...commit,
+      ops: [{ fn: "setTodo", args: [todo] }]
+    })
   }
-}
-
-const sdb = syncDb(db.subspace(["chat", "room1"]), messageReducers)
-
-sdb.write({}, (ops) => {
-  ops.sendMessage({ id: "m1", body: "Hello", createdAt: "2024-01-01" })
-})
+} satisfies ReducerMap
 ```
 
-### Server Sync API
+### AppDb
+
+AppDb handles client commits with deduplication and reducer dispatch:
 
 ```typescript
-import { syncServer } from "./src/syncDb/SyncServer"
+import { appDb } from "./src/syncDb/appDb"
 
-const api = syncServer(db, reducers, {
-  publish: (scope, clock) => {
-    // Notify clients via WebSocket/SSE
-    pubsub.publish(scope, clock)
-  }
+const app = appDb(db, todoAppReducers)
+
+// Query data at a scoped path (returns clock for sync)
+const { clock, data } = app.list(["users", userId], { gte: ["list"], lt: ["list", null] })
+
+// Write a commit (with automatic deduplication via commit.id)
+app.write({
+  id: "commit-1",           // Enables idempotent writes
+  authorId: "user-1",
+  ops: [{ fn: "setList", args: [list] }]
 })
 
-// Client writes
-const result = await api.write(["user", "u1"], [
-  { id: "tx1", ops: [{ fn: "set", args: [["name"], "Chet"] }] }
-])
+// Duplicate writes are ignored
+app.write({ id: "commit-1", authorId: "user-1", ops: [...] })  // No-op
+```
 
-// Client fetches updates
-const updates = await api.fetch(["user", "u1"], lastKnownClock)
+### SyncServer
 
-// Combined sync (write + fetch)
-const syncResult = await api.sync(
-  ["user", "u1"],
-  pendingCommits,
-  lastSyncedClock
-)
+SyncServer orchestrates appDb with transactions and pub/sub for server-side sync:
+
+```typescript
+import { syncServer } from "./src/syncDb/syncServer"
+
+const server = syncServer(db, pubsub, todoAppReducers)
+
+// Query data (delegates to appDb.list)
+const { clock, data } = server.list(["users", userId], range)
+
+// Write commits (wrapped in transaction, publishes changes)
+server.write({
+  authorId: "user-1",
+  ops: [{ fn: "addTodo", args: [todo] }]
+})
 ```
 
 ## Cache: Client-Side Optimization

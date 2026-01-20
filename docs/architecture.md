@@ -7,7 +7,7 @@ TupleDB is built as a stack of composable layers, each implementing or extending
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    Application Layer                     │
-│         RecordDb (IVM)  |  SyncDb (Replication)         │
+│   RecordDb (IVM)  |  SyncDb (syncDb, appDb, syncServer) │
 ├─────────────────────────────────────────────────────────┤
 │                      Sugar Layer                         │
 │    TupleDb (get, set, delete, has, subspace)            │
@@ -204,34 +204,120 @@ See [getting-started.md](getting-started.md) for more RecordDb examples.
 
 ## SyncDb Layer (Replication)
 
-History tracking and operation-based sync:
+SyncDb wraps a TupleDb to provide history tracking and clock-based synchronization. It maintains three subspaces: `clock`, `history`, and `data`.
 
 ```typescript
-const sdb = syncDb(db.subspace(["user", userId]), reducers)
-
-// Write with history
-sdb.write({ authorId: userId }, (ops) => {
-  ops.set(["name"], "Updated")
-})
-
-// Read history
-sdb.history.list({ gte: [lastClock] })
-
-// Get current clock
-const clock = sdb.clock()
+type SyncDb = {
+  clock(): number
+  history(range?: ListArgs<Tuple>): { key: Tuple; value: Commit }[]
+  data: TupleDb
+  apply(commit: CommitMeta & { ops: Op[] }): void
+}
 ```
 
-Server-side sync API:
+### syncDb
+
+Creates a scoped sync database with history tracking:
 
 ```typescript
-const api = syncServer(db, reducers, {
-  publish: (scope, clock) => pubsub.publish(scope, clock)
+const sdb = syncDb(db.subspace(["todoList", listId]), todoListReducers)
+
+// Apply a commit (increments clock, stores in history, runs reducers on data subspace)
+sdb.apply({
+  id: "commit-1",
+  authorId: "user-1",
+  ops: [{ fn: "setTodo", args: [todo] }]
 })
 
-// Client calls
-await api.write(scope, commits)
-await api.fetch(scope, sinceClock)
-await api.sync(scope, commits, syncedClock)
+// Read current clock
+sdb.clock()  // 1
+
+// Read history since a clock value
+sdb.history({ gte: [lastClock] })
+
+// Access data
+sdb.data.get(["todo", todoId])
+```
+
+### appDb
+
+Handles commit processing with deduplication and reducer dispatch:
+
+```typescript
+const app = appDb(db, reducers)
+
+// Query data at a path (returns clock for sync)
+const { clock, data } = app.list(["users", userId], range)
+
+// Write commits with idempotency
+app.write({
+  id: "commit-1",           // Enables deduplication
+  authorId: "user-1",
+  ops: [{ fn: "setList", args: [list] }]
+})
+```
+
+Key features:
+- **Deduplication**: Commits with the same `id` are only applied once
+- **Reducer dispatch**: Operations are routed to the appropriate reducer
+- **Scoped queries**: `list` reads from a path with clock metadata
+
+### syncServer
+
+Server-side orchestration combining appDb with transactions and pub/sub:
+
+```typescript
+const server = syncServer(db, pubsub, reducers)
+
+// Query (delegates to appDb.list)
+const { clock, data } = server.list(path, range)
+
+// Write (wrapped in transaction, publishes changes)
+server.write({
+  authorId: "user-1",
+  ops: [{ fn: "addTodo", args: [todo] }]
+})
+```
+
+### Reducers
+
+Type-safe functions that handle operations:
+
+```typescript
+type Reducer = (tx: TupleDb, commit: CommitMeta, ...args: any[]) => void
+type ReducerMap = Record<string, Reducer>
+
+const todoListReducers = {
+  setTodo: (tx: TupleDb, commit: CommitMeta, todo: Todo) => {
+    tx.set(["todo", todo.id], todo)
+    tx.set(["all", todo.order, todo.id], null)
+  }
+} satisfies ReducerMap
+```
+
+Reducers receive:
+- `tx`: The TupleDb (or data subspace) to write to
+- `commit`: Metadata including `authorId` for authorization
+- `...args`: Type-safe operation arguments
+
+### Multi-Scope Pattern
+
+App-level reducers fan out to multiple scoped syncDbs:
+
+```typescript
+const todoAppReducers = {
+  setList: (tx: TupleDb, commit: CommitMeta, list: TodoList) => {
+    // Each scope gets its own clock and history
+    syncDb(tx.subspace(["users", commit.authorId]), userReducers).apply({
+      ...commit,
+      ops: [{ fn: "setList", args: [list] }]
+    })
+    syncDb(tx.subspace(["todoList", list.id]), todoListReducers).apply({
+      ...commit,
+      ops: [{ fn: "setList", args: [list] }]
+    })
+  }
+} satisfies ReducerMap
 ```
 
 ## Range Abstractions

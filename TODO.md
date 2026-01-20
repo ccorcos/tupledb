@@ -11,7 +11,7 @@ HERE: HumanTodoMVC
 Include the appDb and syncDb abstractions in Readme.md, Claude.md, docs/getting-started.md and docs/architecture.md But don't worry about syncDb/client abstractions just yet.
 
 
-ScopeState
+In the AppDbClient, it seems redundant to keep track of the syncDb clocks outside of the cache itself. Since we're applying reducers, we need the clock to be available in the cache. In fact, the entire ScopeState feels a bit unnecessary. Is there a way to refactor this code to be simpler and more consider? Same with the SyncDbClient as well.
 
 
 

@@ -116,3 +116,116 @@ const tx = tupleTx(db)
 tx.set(...)
 tx.commit()
 ```
+
+## SyncDb
+
+SyncDb provides history tracking and clock-based synchronization for replication scenarios. It wraps a TupleDb and maintains separate `clock`, `history`, and `data` subspaces.
+
+```ts
+import { syncDb } from "./src/syncDb/syncDb"
+
+const sdb = syncDb(db.subspace(["todoList", listId]), todoListReducers)
+
+// Apply a commit (increments clock, stores in history, runs reducers)
+sdb.apply({
+  id: "commit-1",
+  authorId: "user-1",
+  ops: [{ fn: "setTodo", args: [todo] }]
+})
+
+// Read current clock
+const clock = sdb.clock()  // 1
+
+// Read history
+const commits = sdb.history({ gte: [0] })
+
+// Access data subspace
+sdb.data.get(["todo", todoId])
+```
+
+### Reducers
+
+Reducers are type-safe functions that handle operations. They receive the transaction, commit metadata (for authorization), and operation args.
+
+```ts
+import { CommitMeta, ReducerMap } from "./src/syncDb/types"
+
+const todoListReducers = {
+  setTodo: (tx: TupleDb, commit: CommitMeta, todo: Todo) => {
+    tx.set(["todo", todo.id], todo)
+    tx.set(["all", todo.order, todo.id], null)
+    if (todo.checked) tx.set(["checked", todo.order, todo.id], null)
+    else tx.set(["unchecked", todo.order, todo.id], null)
+  },
+
+  deleteTodo: (tx: TupleDb, commit: CommitMeta, todoId: string) => {
+    const todo = tx.get(["todo", todoId])
+    if (!todo) return
+    tx.delete(["todo", todoId])
+    tx.delete(["all", todo.order, todoId])
+  }
+} satisfies ReducerMap
+```
+
+### Multi-Scope Sync
+
+App-level reducers can fan out to multiple scoped syncDbs:
+
+```ts
+const todoAppReducers = {
+  setList: (tx: TupleDb, commit: CommitMeta, list: TodoList) => {
+    if (!commit.authorId) throw new Error("You need to be logged in.")
+
+    // Update user's list index
+    syncDb(tx.subspace(["users", commit.authorId]), userReducers).apply({
+      ...commit,
+      ops: [{ fn: "setList", args: [list] }]
+    })
+
+    // Update the list itself
+    syncDb(tx.subspace(["todoList", list.id]), todoListReducers).apply({
+      ...commit,
+      ops: [{ fn: "setList", args: [list] }]
+    })
+  }
+} satisfies ReducerMap
+```
+
+## AppDb
+
+AppDb handles client commits with deduplication and reducer dispatch. It's used by syncServer for request handling.
+
+```ts
+import { appDb } from "./src/syncDb/appDb"
+
+const app = appDb(db, reducers)
+
+// Query data at a scoped path
+const { clock, data } = app.list(["users", userId], { gte: ["list"], lt: ["list", null] })
+
+// Write a commit (with automatic deduplication)
+app.write({
+  id: "commit-1",           // Optional - enables idempotent writes
+  authorId: "user-1",
+  ops: [{ fn: "setList", args: [list] }]
+})
+```
+
+## SyncServer
+
+SyncServer orchestrates appDb with transactions and pub/sub for server-side sync:
+
+```ts
+import { syncServer } from "./src/syncDb/syncServer"
+
+const server = syncServer(db, pubsub, reducers)
+
+// Query data
+const { clock, data } = server.list(["users", userId], range)
+
+// Write commits (wrapped in transaction, publishes changes)
+server.write({
+  authorId: "user-1",
+  ops: [{ fn: "setTodo", args: [todo] }]
+})
+```

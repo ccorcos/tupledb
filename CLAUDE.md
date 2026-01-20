@@ -38,10 +38,10 @@ Encoding (Codec, KeyEncoder, ValueEncoder)
     ↓
 TupleDb (sugar API: get, set, delete, subspace)
     ↓
-┌───────────────┬───────────────┐
-│   RecordDb    │    SyncDb     │
-│  (IVM/Schema) │ (Replication) │
-└───────────────┴───────────────┘
+┌───────────────┬────────────────────────────────┐
+│   RecordDb    │            SyncDb              │
+│  (IVM/Schema) │  syncDb → appDb → syncServer   │
+└───────────────┴────────────────────────────────┘
 ```
 
 ## Core Types
@@ -61,6 +61,18 @@ type TupleDb = TupleOkv & {
   delete: (key: Tuple) => void
   subspace: (prefix: Tuple) => TupleDb
 }
+
+// SyncDb for history tracking and replication
+type SyncDb = {
+  clock(): number
+  history(range?: ListArgs<Tuple>): { key: Tuple; value: Commit }[]
+  data: TupleDb
+  apply(commit: CommitMeta & { ops: Op[] }): void
+}
+
+// Reducers handle operations with type-safe args
+type Reducer = (tx: TupleDb, commit: CommitMeta, ...args: any[]) => void
+type ReducerMap = Record<string, Reducer>
 ```
 
 ## Key Principles
