@@ -1,44 +1,12 @@
 import { randomId } from "../../shared/randomId"
 import { codec } from "../../tupleDb/Codec"
-import { InMemoryOkv } from "../../tupleDb/InMemoryOkv"
 import { OkvCache } from "../../tupleDb/OkvCache"
 import { Transaction } from "../../tupleDb/Transaction"
 import { tupleDb } from "../../tupleDb/TupleDb"
-import { JSONValue, ListArgs, Tuple, TupleDb, WriteArgs } from "../../tupleDb/types"
+import { JSONValue, ListArgs, Tuple } from "../../tupleDb/types"
 import { Commit, CommitMeta, Op, ReducerMap } from "../types"
 import { SyncDbClient } from "./SyncDbClient"
 import { AppDbClientOptions, AppServerApi, ConfirmedCommit, PendingCommit, PubsubApi } from "./types"
-
-
-function encodeSubspaceArgs(args: ListArgs<Tuple>, prefix: Tuple): ListArgs<Tuple> {
-	return {
-		...args,
-		gt: args.gt ? [...prefix, ...args.gt] : undefined,
-		gte: args.gte ? [...prefix, ...args.gte] : args.gt ? undefined : prefix,
-		lt: args.lt ? [...prefix, ...args.lt] : undefined,
-		lte: args.lte ? [...prefix, ...args.lte] : args.lt ? undefined : [...prefix, []],
-	}
-}
-
-function decodeSubspaceResult(
-	result: { key: Tuple; value: JSONValue }[],
-	prefix: Tuple
-): { key: Tuple; value: JSONValue }[] {
-	return result.map(({ key, value }) => ({
-		key: key.slice(prefix.length),
-		value,
-	}))
-}
-
-function encodeSubspaceWrite(
-	args: WriteArgs<Tuple, JSONValue>,
-	prefix: Tuple
-): WriteArgs<Tuple, JSONValue> {
-	return {
-		set: args.set?.map(({ key, value }) => ({ key: [...prefix, ...key], value })),
-		delete: args.delete?.map((key) => [...prefix, ...key]),
-	}
-}
 
 export class AppDbClient<R extends ReducerMap = ReducerMap> {
 	readonly reducers: R
@@ -46,12 +14,11 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 
 	private server: AppServerApi
 	private pubsub: PubsubApi
-	private data: InMemoryOkv<Tuple, JSONValue>
 	private cache: OkvCache<Tuple, JSONValue>
 	private optimisticTx: Transaction<Tuple, JSONValue>
 	private pendingCommits: PendingCommit<R>[] = []
 	private localSeqCounter = 0
-	private scopeFetching = new Set<string>()
+	private scopeFetching = new Map<string, Promise<void>>()
 	private stateListeners = new Set<() => void>()
 	private unsubscribePubsub?: () => void
 	private subscribedScopes = new Set<string>()
@@ -61,9 +28,8 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 		this.pubsub = options.pubsub
 		this.reducers = options.reducers
 		this.authorId = options.authorId
-		this.data = new InMemoryOkv<Tuple, JSONValue>(codec.compare)
 		this.cache = new OkvCache<Tuple, JSONValue>(codec.compare)
-		this.optimisticTx = new Transaction(this.data)
+		this.optimisticTx = new Transaction(this.cache.data)
 
 		this.unsubscribePubsub = this.pubsub.onMessage((key, value) => {
 			this.handleClockUpdate(key, value as number)
@@ -170,59 +136,62 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 
 	async syncScope(path: Tuple): Promise<void> {
 		const key = JSON.stringify(path)
-		if (this.scopeFetching.has(key)) return
+		const existing = this.scopeFetching.get(key)
+		if (existing) return existing
 
-		this.scopeFetching.add(key)
+		const promise = this._syncScopeImpl(path).finally(() => {
+			this.scopeFetching.delete(key)
+		})
+		this.scopeFetching.set(key, promise)
+		return promise
+	}
 
-		try {
-			const currentClock = this.getClock(path)
-			const historyResult = await this.server.history(path, currentClock)
-			const dataResult = await this.server.list(path, {})
+	private async _syncScopeImpl(path: Tuple): Promise<void> {
+		const currentClock = this.getClock(path)
+		const historyResult = await this.server.history(path, currentClock)
+		const dataResult = await this.server.list(path, {})
 
-			for (const commit of historyResult.commits) {
-				const wasPending = this.pendingCommits.some((p) => p.id === commit.id)
-				const confirmed: ConfirmedCommit<R> = { ...(commit as Commit<R>), isLocal: wasPending }
-				this.data.write({ set: [{ key: [...path, "history", commit.clock], value: confirmed }] })
-				if (wasPending) {
-					this.removePendingCommit(commit.id)
-				}
+		for (const commit of historyResult.commits) {
+			const wasPending = this.pendingCommits.some((p) => p.id === commit.id)
+			const confirmed: ConfirmedCommit<R> = { ...(commit as Commit<R>), isLocal: wasPending }
+			this.cache.data.write({ set: [{ key: [...path, "history", commit.clock], value: confirmed }] })
+			if (wasPending) {
+				this.removePendingCommit(commit.id)
 			}
+		}
 
-			const dataPrefix = [...path, "data"]
-			const existingData = this.data.list({
-				gte: dataPrefix,
-				lte: [...dataPrefix, []],
-			})
-			this.data.write({ delete: existingData.map(({ key }) => key) })
-			this.data.write({
-				set: dataResult.data.map(({ key, value }) => ({
+		const dataPrefix = [...path, "data"]
+		const existingData = this.cache.data.list({
+			gte: dataPrefix,
+			lte: [...dataPrefix, []],
+		})
+		this.cache.data.write({ delete: existingData.map(({ key }) => key) })
+		this.cache.data.write({
+			set: dataResult.data.map(({ key, value }) => ({
+				key: [...path, ...key],
+				value,
+			})),
+		})
+
+		const newClock = Math.max(currentClock, historyResult.clock, dataResult.clock)
+		this.cache.data.write({ set: [{ key: [...path, "clock"], value: newClock }] })
+
+		this.cache.insert([
+			{
+				args: { gte: dataPrefix, lte: [...dataPrefix, []] },
+				result: dataResult.data.map(({ key, value }) => ({
 					key: [...path, ...key],
 					value,
 				})),
-			})
+			},
+		])
 
-			const newClock = Math.max(currentClock, historyResult.clock, dataResult.clock)
-			this.data.write({ set: [{ key: [...path, "clock"], value: newClock }] })
-
-			this.cache.insert([
-				{
-					args: { gte: dataPrefix, lte: [...dataPrefix, []] },
-					result: dataResult.data.map(({ key, value }) => ({
-						key: [...path, ...key],
-						value,
-					})),
-				},
-			])
-
-			this.rebuildOptimisticState()
-			this.emitDataChanges()
-		} finally {
-			this.scopeFetching.delete(key)
-		}
+		this.rebuildOptimisticState()
+		this.emitDataChanges()
 	}
 
 	getClock(path: Tuple): number {
-		const result = this.data.list({ gte: [...path, "clock"], lte: [...path, "clock"] })
+		const result = this.cache.data.list({ gte: [...path, "clock"], lte: [...path, "clock"] })
 		return (result.at(0)?.value as number) || 0
 	}
 
@@ -261,7 +230,7 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 			authorId: commit.authorId,
 			createdAt: commit.createdAt,
 		}
-		const db = this.createTupleDb(this.optimisticTx)
+		const db = tupleDb(this.optimisticTx)
 		for (const op of commit.ops) {
 			const reducer = this.reducers[op.fn as keyof R]
 			if (!reducer) {
@@ -278,66 +247,12 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 			authorId: commit.authorId,
 			createdAt: commit.createdAt,
 		}
-		const db = this.createConfirmedDataTupleDb()
+		const db = tupleDb(this.cache.data)
 		for (const op of commit.ops) {
 			const reducer = this.reducers[op.fn as keyof R]
 			if (!reducer) continue
 			reducer(db, meta, ...op.args)
 		}
-	}
-
-	private createConfirmedDataTupleDb(): TupleDb {
-		const self = this
-		return {
-			compare: codec.compare,
-			list: this.data.list,
-			write: this.data.write,
-			get: (key) => this.data.list({ gte: key, lte: key }).at(0)?.value,
-			has: (key) => this.data.list({ gte: key, lte: key }).length > 0,
-			set: (key, value) => this.data.write({ set: [{ key, value }] }),
-			delete: (key) => this.data.write({ delete: [key] }),
-			subspace: (prefix) => self.createConfirmedDataSubspace(prefix),
-		}
-	}
-
-	private createConfirmedDataSubspace(prefix: Tuple): TupleDb {
-		const data = this.data
-		const createSubspace = this.createConfirmedDataSubspace.bind(this)
-		return {
-			compare: codec.compare,
-			list: (args = {}) => decodeSubspaceResult(data.list(encodeSubspaceArgs(args, prefix)), prefix),
-			write: (args) => data.write(encodeSubspaceWrite(args, prefix)),
-			get: (key) => data.list({ gte: [...prefix, ...key], lte: [...prefix, ...key] }).at(0)?.value,
-			has: (key) => data.list({ gte: [...prefix, ...key], lte: [...prefix, ...key] }).length > 0,
-			set: (key, value) => data.write({ set: [{ key: [...prefix, ...key], value }] }),
-			delete: (key) => data.write({ delete: [[...prefix, ...key]] }),
-			subspace: (subPrefix) => createSubspace([...prefix, ...subPrefix]),
-		}
-	}
-
-	private createTupleDb(tx: Transaction<Tuple, JSONValue>): TupleDb {
-		const self = this
-		return {
-			compare: tx.compare,
-			list: tx.list,
-			write: tx.write,
-			get: (key) => tx.list({ gte: key, lte: key }).at(0)?.value,
-			has: (key) => tx.list({ gte: key, lte: key }).length > 0,
-			set: (key, value) => tx.write({ set: [{ key, value }] }),
-			delete: (key) => tx.write({ delete: [key] }),
-			subspace: (prefix) => tupleDb(self.createSubspaceTx(tx, prefix)),
-		}
-	}
-
-	private createSubspaceTx(
-		tx: Transaction<Tuple, JSONValue>,
-		prefix: Tuple
-	): Transaction<Tuple, JSONValue> {
-		return {
-			compare: tx.compare,
-			list: (args = {}) => decodeSubspaceResult(tx.list(encodeSubspaceArgs(args, prefix)), prefix),
-			write: (args) => tx.write(encodeSubspaceWrite(args, prefix)),
-		} as Transaction<Tuple, JSONValue>
 	}
 
 	private removePendingCommit(id: string): void {
@@ -348,7 +263,7 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 	}
 
 	private rebuildOptimisticState(): void {
-		this.optimisticTx = new Transaction(this.data)
+		this.optimisticTx = new Transaction(this.cache.data)
 		for (const commit of this.pendingCommits) {
 			if (commit.status !== "failed") {
 				this.applyCommitOptimistically(commit)

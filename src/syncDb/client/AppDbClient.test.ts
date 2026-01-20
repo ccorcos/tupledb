@@ -1,59 +1,76 @@
 import { strict as assert } from "node:assert"
-import { describe, it, beforeEach } from "node:test"
+import { beforeEach, describe, it } from "node:test"
+import { PubsubHarness, PubsubHarnessClient } from "../../fixtures/PubsubHarness"
+import { randomId } from "../../shared/randomId"
+import { tupleDb } from "../../tupleDb/TupleDb"
+import { Tuple, TupleDb } from "../../tupleDb/types"
+import { Todo, TodoList, todoAppReducers } from "../examples/TodoMVC"
+import { syncServer } from "../syncServer"
+import { Commit } from "../types"
 import { AppDbClient } from "./AppDbClient"
-import { SyncDbClient } from "./SyncDbClient"
-import { AppServerApi, PubsubApi } from "./types"
-import { Commit, ReducerMap, CommitMeta, CommitArgs } from "../types"
-import { TupleDb, Tuple, JSONValue } from "../../tupleDb/types"
+import { AppServerApi } from "./types"
 
 // ============================================================================
-// Test Reducers
+// Test Helpers
 // ============================================================================
 
-type Todo = {
-	id: string
-	text: string
-	checked: boolean
-	listId: string
+function createList(overrides: Partial<TodoList> = {}): TodoList {
+	return {
+		id: randomId(),
+		name: "My List",
+		editedAt: new Date().toISOString(),
+		...overrides,
+	}
 }
 
-const testReducers = {
-	setTodo: (tx: TupleDb, _commit: CommitMeta, todo: Todo) => {
-		// Write to the specific list's data subspace
-		tx.subspace(["todoList", todo.listId]).subspace(["data"]).set(["todo", todo.id], todo)
-	},
-	deleteTodo: (tx: TupleDb, _commit: CommitMeta, listId: string, todoId: string) => {
-		tx.subspace(["todoList", listId]).subspace(["data"]).delete(["todo", todoId])
-	},
-} satisfies ReducerMap
+function createTodo(listId: string, overrides: Partial<Todo> = {}): Todo {
+	return {
+		id: randomId(),
+		listId,
+		text: "Do something",
+		checked: false,
+		order: "a",
+		...overrides,
+	}
+}
 
-type TestReducers = typeof testReducers
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Get just the todos from a syncDb (filters out indexes) */
+function getTodos(syncDb: { list: () => { key: Tuple; value: any }[] }): Todo[] {
+	return syncDb
+		.list()
+		.filter((d) => d.key[0] === "todo")
+		.map((d) => d.value as Todo)
+}
 
 // ============================================================================
-// Mock Server
+// Mock Server - wraps real syncServer with delay/failure simulation
 // ============================================================================
 
 class MockAppServer implements AppServerApi {
-	private data = new Map<string, { key: Tuple; value: JSONValue }[]>()
-	private commits = new Map<string, Commit[]>()
-	private clocks = new Map<string, number>()
-	private seen = new Set<string>()
+	private db: TupleDb
+	private server: ReturnType<typeof syncServer>
 
 	delay = 0
 	shouldFail = false
 	failMessage = "Server error"
 
+	constructor(pubsub: PubsubHarness) {
+		this.db = tupleDb()
+		this.server = syncServer(this.db, pubsub, todoAppReducers)
+	}
+
 	async list(
 		path: Tuple,
-		_range: any
-	): Promise<{ clock: number; data: { key: Tuple; value: JSONValue }[] }> {
+		range: any
+	): Promise<{ clock: number; data: { key: Tuple; value: any }[] }> {
 		if (this.delay) await sleep(this.delay)
 		if (this.shouldFail) throw new Error(this.failMessage)
-		const key = JSON.stringify(path)
-		return {
-			clock: this.clocks.get(key) ?? 0,
-			data: [...(this.data.get(key) ?? [])],
-		}
+		const result = this.server.list(path, range)
+		return { clock: result.clock ?? 0, data: result.data }
 	}
 
 	async history(
@@ -62,131 +79,49 @@ class MockAppServer implements AppServerApi {
 	): Promise<{ clock: number; commits: Commit[] }> {
 		if (this.delay) await sleep(this.delay)
 		if (this.shouldFail) throw new Error(this.failMessage)
-		const key = JSON.stringify(path)
-		const allCommits = this.commits.get(key) ?? []
-		const commits = allCommits.filter((c) => c.clock > sinceClock)
-		return { clock: this.clocks.get(key) ?? 0, commits }
+		const result = this.server.list(path, {
+			gte: ["history"],
+			lte: ["history", []],
+		})
+		const commits = result.data
+			.map(({ value }) => value as Commit)
+			.filter((c) => c.clock > sinceClock)
+		return { clock: result.clock ?? 0, commits }
 	}
 
-	async write(commit: CommitArgs): Promise<void> {
+	async write(commit: any): Promise<void> {
 		if (this.delay) await sleep(this.delay)
 		if (this.shouldFail) throw new Error(this.failMessage)
-
-		// Check for duplicate
-		if (commit.id && this.seen.has(commit.id)) return
-		if (commit.id) this.seen.add(commit.id)
-
-		// Apply each op using the reducers (simplified mock)
-		for (const op of commit.ops) {
-			if (op.fn === "setTodo") {
-				const todo = op.args[0] as Todo
-				const scopeKey = JSON.stringify(["todoList", todo.listId])
-
-				// Update clock
-				const clock = (this.clocks.get(scopeKey) ?? 0) + 1
-				this.clocks.set(scopeKey, clock)
-
-				// Store commit
-				const scopeCommits = this.commits.get(scopeKey) ?? []
-				scopeCommits.push({
-					id: commit.id ?? `commit-${clock}`,
-					authorId: commit.authorId,
-					createdAt: commit.createdAt,
-					clock,
-					ops: [op],
-				})
-				this.commits.set(scopeKey, scopeCommits)
-
-				// Update data
-				const scopeData = this.data.get(scopeKey) ?? []
-				const index = scopeData.findIndex(
-					(d) => d.key[0] === "data" && d.key[1] === "todo" && d.key[2] === todo.id
-				)
-				const entry = { key: ["data", "todo", todo.id] as Tuple, value: todo }
-				if (index >= 0) {
-					scopeData[index] = entry
-				} else {
-					scopeData.push(entry)
-				}
-				this.data.set(scopeKey, scopeData)
-			} else if (op.fn === "deleteTodo") {
-				const [listId, todoId] = op.args as [string, string]
-				const scopeKey = JSON.stringify(["todoList", listId])
-
-				// Update clock
-				const clock = (this.clocks.get(scopeKey) ?? 0) + 1
-				this.clocks.set(scopeKey, clock)
-
-				// Store commit
-				const scopeCommits = this.commits.get(scopeKey) ?? []
-				scopeCommits.push({
-					id: commit.id ?? `commit-${clock}`,
-					authorId: commit.authorId,
-					createdAt: commit.createdAt,
-					clock,
-					ops: [op],
-				})
-				this.commits.set(scopeKey, scopeCommits)
-
-				// Update data
-				const scopeData = this.data.get(scopeKey) ?? []
-				const filtered = scopeData.filter(
-					(d) => !(d.key[0] === "data" && d.key[1] === "todo" && d.key[2] === todoId)
-				)
-				this.data.set(scopeKey, filtered)
-			}
-		}
+		this.server.write(commit)
 	}
 
 	reset() {
-		this.data.clear()
-		this.commits.clear()
-		this.clocks.clear()
-		this.seen.clear()
 		this.delay = 0
 		this.shouldFail = false
 	}
-
-	getClock(path: Tuple) {
-		return this.clocks.get(JSON.stringify(path)) ?? 0
-	}
 }
 
 // ============================================================================
-// Mock Pubsub
+// Test Setup
 // ============================================================================
 
-class MockPubsub implements PubsubApi {
-	private listeners = new Set<(key: string, value: any) => void>()
+type TestReducers = typeof todoAppReducers
 
-	subscribe(_key: string) {}
-	unsubscribe(_key: string) {}
-
-	onMessage(listener: (key: string, value: any) => void): () => void {
-		this.listeners.add(listener)
-		return () => this.listeners.delete(listener)
-	}
-
-	publish(key: string, value: any) {
-		for (const listener of this.listeners) {
-			listener(key, value)
-		}
-	}
+function createTestHarness() {
+	const pubsub = new PubsubHarness()
+	const server = new MockAppServer(pubsub)
+	const client = pubsub.client()
+	return { pubsub, server, client }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function createAppDb(server: MockAppServer, pubsub: MockPubsub): AppDbClient<TestReducers> {
+function createAppDb(
+	server: MockAppServer,
+	client: PubsubHarnessClient
+): AppDbClient<TestReducers> {
 	return new AppDbClient({
 		server,
-		pubsub,
-		reducers: testReducers,
+		pubsub: client,
+		reducers: todoAppReducers,
 		authorId: "user-1",
 	})
 }
@@ -196,17 +131,20 @@ function createAppDb(server: MockAppServer, pubsub: MockPubsub): AppDbClient<Tes
 // ============================================================================
 
 describe("AppDbClient", () => {
+	let pubsub: PubsubHarness
 	let server: MockAppServer
-	let pubsub: MockPubsub
+	let client: PubsubHarnessClient
 
 	beforeEach(() => {
-		server = new MockAppServer()
-		pubsub = new MockPubsub()
+		const harness = createTestHarness()
+		pubsub = harness.pubsub
+		server = harness.server
+		client = harness.client
 	})
 
 	describe("Initialization", () => {
 		it("starts with uninitialized scopes", () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
 
 			assert.equal(syncDb.isInitialized(), false)
@@ -214,7 +152,7 @@ describe("AppDbClient", () => {
 		})
 
 		it("initializes scope and fetches data", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
 
 			await syncDb.initialize()
@@ -223,65 +161,65 @@ describe("AppDbClient", () => {
 		})
 
 		it("subscribes to pubsub on initialize", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+
 			await syncDb.initialize()
 
-			// External commit
+			// External commit via server
 			await server.write({
-				id: "external-commit",
+				authorId: "other-user",
 				ops: [
-					{
-						fn: "setTodo",
-						args: [{ id: "todo-1", text: "External", checked: false, listId: "list-1" }],
-					},
+					{ fn: "setList", args: [list] },
+					{ fn: "addTodo", args: [createTodo("list-1", { id: "todo-1", text: "External" })] },
 				],
 			})
 
-			pubsub.publish(
-				JSON.stringify(["todoList", "list-1"]),
-				server.getClock(["todoList", "list-1"])
-			)
+			// Simulate pubsub notification (server would do this in production)
+			pubsub.publish(JSON.stringify(["todoList", "list-1"]), 2)
 
 			await sleep(10)
 
-			const data = syncDb.list()
-			assert.equal(data.length, 1)
-			assert.equal(data[0].value.text, "External")
+			const todos = getTodos(syncDb)
+			assert.equal(todos.length, 1)
+			assert.equal(todos[0].text, "External")
 		})
 	})
 
 	describe("Commits", () => {
 		it("applies commit optimistically and persists after confirmation", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
 			await syncDb.initialize()
 
 			await appDb.commit([
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-1", text: "Test", checked: false, listId: "list-1" }],
-				},
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
 			])
 
-			const data = syncDb.list()
-			assert.equal(data.length, 1)
-			assert.equal(data[0].value.text, "Test")
+			const todos = getTodos(syncDb)
+			assert.equal(todos.length, 1)
+			assert.equal(todos[0].text, "Test")
 			assert.equal(appDb.getPendingCommits().length, 0)
 		})
 
 		it("pending commits are visible during submission", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
 			await syncDb.initialize()
 
 			server.delay = 100
 
 			const commitPromise = appDb.commit([
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-1", text: "Test", checked: false, listId: "list-1" }],
-				},
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
 			])
 
 			const pending = appDb.getPendingCommits()
@@ -289,45 +227,50 @@ describe("AppDbClient", () => {
 			assert.equal(pending[0].status, "submitting")
 
 			// Data is visible optimistically
-			const data = syncDb.list()
-			assert.equal(data.length, 1)
+			const todos = getTodos(syncDb)
+			assert.equal(todos.length, 1)
 
 			await commitPromise
 			assert.equal(appDb.getPendingCommits().length, 0)
 		})
 
 		it("cross-scope commits affect multiple scopes", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
 			const syncDb2 = appDb.getSyncDb(["todoList", "list-2"])
 
 			await syncDb1.initialize()
 			await syncDb2.initialize()
 
-			// Commit to two different lists
+			const list1 = createList({ id: "list-1" })
+			const list2 = createList({ id: "list-2" })
+			const todo1 = createTodo("list-1", { id: "todo-1", text: "List 1 Todo" })
+			const todo2 = createTodo("list-2", { id: "todo-2", text: "List 2 Todo" })
+
 			await appDb.commit([
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-1", text: "List 1 Todo", checked: false, listId: "list-1" }],
-				},
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-2", text: "List 2 Todo", checked: false, listId: "list-2" }],
-				},
+				{ fn: "setList", args: [list1] },
+				{ fn: "setList", args: [list2] },
+				{ fn: "addTodo", args: [todo1] },
+				{ fn: "addTodo", args: [todo2] },
 			])
 
-			assert.equal(syncDb1.list().length, 1)
-			assert.equal(syncDb1.list()[0].value.text, "List 1 Todo")
+			const todos1 = getTodos(syncDb1)
+			assert.equal(todos1.length, 1)
+			assert.equal(todos1[0].text, "List 1 Todo")
 
-			assert.equal(syncDb2.list().length, 1)
-			assert.equal(syncDb2.list()[0].value.text, "List 2 Todo")
+			const todos2 = getTodos(syncDb2)
+			assert.equal(todos2.length, 1)
+			assert.equal(todos2[0].text, "List 2 Todo")
 		})
 	})
 
 	describe("Error Handling", () => {
 		it("marks commit as failed on server error", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
 			await syncDb.initialize()
 
 			server.shouldFail = true
@@ -335,10 +278,8 @@ describe("AppDbClient", () => {
 
 			try {
 				await appDb.commit([
-					{
-						fn: "setTodo",
-						args: [{ id: "todo-1", text: "Test", checked: false, listId: "list-1" }],
-					},
+					{ fn: "setList", args: [list] },
+					{ fn: "addTodo", args: [todo] },
 				])
 				assert.fail("Should have thrown")
 			} catch (e) {
@@ -353,18 +294,19 @@ describe("AppDbClient", () => {
 		})
 
 		it("can retry failed commits", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
 			await syncDb.initialize()
 
 			server.shouldFail = true
 
 			try {
 				await appDb.commit([
-					{
-						fn: "setTodo",
-						args: [{ id: "todo-1", text: "Test", checked: false, listId: "list-1" }],
-					},
+					{ fn: "setList", args: [list] },
+					{ fn: "addTodo", args: [todo] },
 				])
 			} catch {
 				// Expected
@@ -378,18 +320,19 @@ describe("AppDbClient", () => {
 		})
 
 		it("can cancel failed commits", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
 			await syncDb.initialize()
 
 			server.shouldFail = true
 
 			try {
 				await appDb.commit([
-					{
-						fn: "setTodo",
-						args: [{ id: "todo-1", text: "Test", checked: false, listId: "list-1" }],
-					},
+					{ fn: "setList", args: [list] },
+					{ fn: "addTodo", args: [todo] },
 				])
 			} catch {
 				// Expected
@@ -405,32 +348,34 @@ describe("AppDbClient", () => {
 
 	describe("SyncDbClient", () => {
 		it("provides scoped view of data", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
 			await syncDb.initialize()
 
 			await appDb.commit([
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-1", text: "Test", checked: false, listId: "list-1" }],
-				},
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
 			])
 
-			const data = syncDb.list()
-			assert.equal(data.length, 1)
-			assert.deepEqual(data[0].key, ["todo", "todo-1"])
+			const todos = getTodos(syncDb)
+			assert.equal(todos.length, 1)
+			assert.equal(todos[0].id, "todo-1")
 		})
 
 		it("can get specific key", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
 			await syncDb.initialize()
 
 			await appDb.commit([
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-1", text: "Test", checked: false, listId: "list-1" }],
-				},
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
 			])
 
 			const value = syncDb.get(["todo", "todo-1"])
@@ -439,28 +384,29 @@ describe("AppDbClient", () => {
 		})
 
 		it("different scopes are isolated", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
 			const syncDb2 = appDb.getSyncDb(["todoList", "list-2"])
 
 			await syncDb1.initialize()
 			await syncDb2.initialize()
 
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "List 1" })
+
 			await appDb.commit([
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-1", text: "List 1", checked: false, listId: "list-1" }],
-				},
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
 			])
 
-			assert.equal(syncDb1.list().length, 1)
-			assert.equal(syncDb2.list().length, 0)
+			assert.equal(getTodos(syncDb1).length, 1)
+			assert.equal(getTodos(syncDb2).length, 0)
 		})
 	})
 
 	describe("Subscriptions", () => {
 		it("notifies on commit", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 
 			let changeCount = 0
 			appDb.onStateChange(() => {
@@ -468,20 +414,21 @@ describe("AppDbClient", () => {
 			})
 
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
 			await syncDb.initialize()
 
 			await appDb.commit([
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-1", text: "Test", checked: false, listId: "list-1" }],
-				},
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
 			])
 
 			assert.ok(changeCount > 0)
 		})
 
 		it("data subscriptions notify on data changes", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
 
 			let changeCount = 0
@@ -491,11 +438,12 @@ describe("AppDbClient", () => {
 
 			await syncDb1.initialize()
 
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "List 1 Todo" })
+
 			await appDb.commit([
-				{
-					fn: "setTodo",
-					args: [{ id: "todo-1", text: "List 1 Todo", checked: false, listId: "list-1" }],
-				},
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
 			])
 
 			assert.ok(changeCount > 0)
@@ -504,7 +452,7 @@ describe("AppDbClient", () => {
 
 	describe("Dispose", () => {
 		it("cleans up on dispose", async () => {
-			const appDb = createAppDb(server, pubsub)
+			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
 			await syncDb.initialize()
 
@@ -517,6 +465,7 @@ describe("AppDbClient", () => {
 
 			const countAfterDispose = changeCount
 
+			// This should not trigger our listener since we disposed
 			pubsub.publish(JSON.stringify(["todoList", "list-1"]), 99)
 			await sleep(10)
 
