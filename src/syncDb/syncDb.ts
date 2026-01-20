@@ -1,14 +1,14 @@
 import { ListArgs, Tuple, TupleDb } from "../tupleDb/types"
 import { Commit, CommitMeta, Op, ReducerMap } from "./types"
 
-export type SyncDb = {
+export type SyncDb<R extends ReducerMap> = {
 	clock(): number
 	history(range?: ListArgs<Tuple>): { key: Tuple; value: Commit }[]
 	data: TupleDb
-	apply(commit: CommitMeta & { ops: Op[] }): void
+	apply(commit: CommitMeta & { ops: Op<R>[] }): void
 }
 
-export function syncDb(db: TupleDb, reducers: ReducerMap): SyncDb {
+export function syncDb<R extends ReducerMap>(db: TupleDb, reducers: R): SyncDb<R> {
 	return {
 		clock: () => (db.get(["clock"]) as number) || 0,
 
@@ -20,13 +20,13 @@ export function syncDb(db: TupleDb, reducers: ReducerMap): SyncDb {
 			const clock = ((db.get(["clock"]) as number) || 0) + 1
 			db.set(["clock"], clock)
 
-			const finalCommit: Commit = { ...commit, clock }
+			const finalCommit: Commit<R> = { ...commit, clock }
 			db.set(["history", clock], finalCommit)
 
 			const { ops, ...meta } = commit
 			for (const op of ops) {
 				const reducer = reducers[op.fn]
-				if (!reducer) throw new Error(`Unknown operation: ${op.fn}`)
+				if (!reducer) throw new Error(`Unknown operation: ${op.fn as string}`)
 				reducer(db.subspace(["data"]), meta, ...op.args)
 			}
 		},

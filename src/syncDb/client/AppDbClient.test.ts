@@ -143,31 +143,34 @@ describe("AppDbClient", () => {
 	})
 
 	describe("Initialization", () => {
-		it("starts with uninitialized scopes", () => {
+		it("starts with empty data before sync completes", () => {
+			server.delay = 100
 			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
 
-			assert.equal(syncDb.isInitialized(), false)
 			assert.equal(syncDb.clock(), 0)
+			assert.deepEqual(syncDb.list(), [])
+			syncDb.destroy()
 		})
 
-		it("initializes scope and fetches data", async () => {
+		it("implicitly initializes scope on getSyncDb", async () => {
 			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
-			assert.equal(syncDb.isInitialized(), true)
+			assert.equal(syncDb.clock() >= 0, true)
+			syncDb.destroy()
 		})
 
-		it("subscribes to pubsub on initialize", async () => {
+		it("subscribes to pubsub on getSyncDb", async () => {
 			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
-			// External commit via server
+			// External commit via server (publishes to pubsub automatically)
 			await server.write({
 				authorId: "other-user",
 				ops: [
@@ -176,14 +179,59 @@ describe("AppDbClient", () => {
 				],
 			})
 
-			// Simulate pubsub notification (server would do this in production)
-			pubsub.publish(JSON.stringify(["todoList", "list-1"]), 2)
-
 			await sleep(10)
 
 			const todos = getTodos(syncDb)
 			assert.equal(todos.length, 1)
 			assert.equal(todos[0].text, "External")
+			syncDb.destroy()
+		})
+	})
+
+	describe("Reference Counting", () => {
+		it("increments ref count on getSyncDb", async () => {
+			const appDb = createAppDb(server, client)
+			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb2 = appDb.getSyncDb(["todoList", "list-1"])
+
+			await syncDb1.sync()
+
+			// Both syncDbs should work
+			assert.equal(syncDb1.clock(), syncDb2.clock())
+
+			syncDb1.destroy()
+			syncDb2.destroy()
+		})
+
+		it("unsubscribes from pubsub when all refs destroyed", async () => {
+			const appDb = createAppDb(server, client)
+			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb2 = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+
+			await syncDb1.sync()
+
+			syncDb1.destroy()
+
+			// syncDb2 should still receive updates
+			await server.write({
+				authorId: "other-user",
+				ops: [
+					{ fn: "setList", args: [list] },
+					{ fn: "addTodo", args: [createTodo("list-1", { id: "todo-1", text: "Test" })] },
+				],
+			})
+			await sleep(10)
+			assert.equal(getTodos(syncDb2).length, 1)
+
+			syncDb2.destroy()
+
+			// After both destroyed, pubsub should be unsubscribed
+			// Creating a new syncDb should work fresh
+			const syncDb3 = appDb.getSyncDb(["todoList", "list-1"])
+			await syncDb3.sync()
+			assert.equal(getTodos(syncDb3).length, 1)
+			syncDb3.destroy()
 		})
 	})
 
@@ -194,7 +242,7 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			appDb.commit([
 				{ fn: "setList", args: [list] },
@@ -209,6 +257,7 @@ describe("AppDbClient", () => {
 			// Wait for server confirmation
 			await appDb.flush()
 			assert.equal(appDb.getPendingCommits().length, 0)
+			syncDb.destroy()
 		})
 
 		it("pending commits are visible during submission", async () => {
@@ -217,7 +266,7 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			server.delay = 100
 
@@ -239,6 +288,7 @@ describe("AppDbClient", () => {
 
 			await appDb.flush()
 			assert.equal(appDb.getPendingCommits().length, 0)
+			syncDb.destroy()
 		})
 
 		it("cross-scope commits affect multiple scopes", async () => {
@@ -246,8 +296,8 @@ describe("AppDbClient", () => {
 			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
 			const syncDb2 = appDb.getSyncDb(["todoList", "list-2"])
 
-			await syncDb1.initialize()
-			await syncDb2.initialize()
+			await syncDb1.sync()
+			await syncDb2.sync()
 
 			const list1 = createList({ id: "list-1" })
 			const list2 = createList({ id: "list-2" })
@@ -271,6 +321,8 @@ describe("AppDbClient", () => {
 			assert.equal(todos2[0].text, "List 2 Todo")
 
 			await appDb.flush()
+			syncDb1.destroy()
+			syncDb2.destroy()
 		})
 	})
 
@@ -281,7 +333,7 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			server.shouldFail = true
 			server.failMessage = "Network error"
@@ -298,6 +350,7 @@ describe("AppDbClient", () => {
 			assert.equal(pending.length, 1)
 			assert.equal(pending[0].status, "failed")
 			assert.equal(pending[0].error, "Network error")
+			syncDb.destroy()
 		})
 
 		it("can retry failed commits", async () => {
@@ -306,7 +359,7 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			server.shouldFail = true
 
@@ -323,6 +376,7 @@ describe("AppDbClient", () => {
 			appDb.retryCommit(pending.id)
 			await appDb.flush()
 			assert.equal(appDb.getPendingCommits().length, 0)
+			syncDb.destroy()
 		})
 
 		it("can cancel failed commits", async () => {
@@ -331,7 +385,7 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			server.shouldFail = true
 
@@ -347,17 +401,18 @@ describe("AppDbClient", () => {
 
 			assert.equal(appDb.getPendingCommits().length, 0)
 			assert.equal(syncDb.list().length, 0)
+			syncDb.destroy()
 		})
 	})
 
-	describe("SyncDbClient", () => {
+	describe("SyncDb", () => {
 		it("provides scoped view of data", async () => {
 			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			appDb.commit([
 				{ fn: "setList", args: [list] },
@@ -369,6 +424,7 @@ describe("AppDbClient", () => {
 			assert.equal(todos[0].id, "todo-1")
 
 			await appDb.flush()
+			syncDb.destroy()
 		})
 
 		it("can get specific key", async () => {
@@ -377,7 +433,7 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			appDb.commit([
 				{ fn: "setList", args: [list] },
@@ -389,6 +445,7 @@ describe("AppDbClient", () => {
 			assert.equal(value.text, "Test")
 
 			await appDb.flush()
+			syncDb.destroy()
 		})
 
 		it("different scopes are isolated", async () => {
@@ -396,8 +453,8 @@ describe("AppDbClient", () => {
 			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
 			const syncDb2 = appDb.getSyncDb(["todoList", "list-2"])
 
-			await syncDb1.initialize()
-			await syncDb2.initialize()
+			await syncDb1.sync()
+			await syncDb2.sync()
 
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "List 1" })
@@ -411,6 +468,34 @@ describe("AppDbClient", () => {
 			assert.equal(getTodos(syncDb2).length, 0)
 
 			await appDb.flush()
+			syncDb1.destroy()
+			syncDb2.destroy()
+		})
+
+		it("subspace provides nested view", async () => {
+			const appDb = createAppDb(server, client)
+			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
+			await syncDb.sync()
+
+			appDb.commit([
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
+			])
+
+			const todoSubspace = syncDb.subspace(["todo"])
+			const todos = todoSubspace.list()
+			assert.equal(todos.length, 1)
+			assert.equal(todos[0].key[0], "todo-1")
+
+			const value = todoSubspace.get(["todo-1"])
+			assert.ok(value)
+			assert.equal(value.text, "Test")
+
+			await appDb.flush()
+			syncDb.destroy()
 		})
 	})
 
@@ -427,7 +512,7 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			appDb.commit([
 				{ fn: "setList", args: [list] },
@@ -437,6 +522,7 @@ describe("AppDbClient", () => {
 			assert.ok(changeCount > 0)
 
 			await appDb.flush()
+			syncDb.destroy()
 		})
 
 		it("data subscriptions notify on data changes", async () => {
@@ -448,7 +534,7 @@ describe("AppDbClient", () => {
 				changeCount++
 			})
 
-			await syncDb1.initialize()
+			await syncDb1.sync()
 
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "List 1 Todo" })
@@ -461,6 +547,7 @@ describe("AppDbClient", () => {
 			assert.ok(changeCount > 0)
 
 			await appDb.flush()
+			syncDb1.destroy()
 		})
 	})
 
@@ -468,7 +555,7 @@ describe("AppDbClient", () => {
 		it("cleans up on dispose", async () => {
 			const appDb = createAppDb(server, client)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
-			await syncDb.initialize()
+			await syncDb.sync()
 
 			let changeCount = 0
 			appDb.onStateChange(() => {
@@ -480,7 +567,14 @@ describe("AppDbClient", () => {
 			const countAfterDispose = changeCount
 
 			// This should not trigger our listener since we disposed
-			pubsub.publish(JSON.stringify(["todoList", "list-1"]), 99)
+			const list = createList({ id: "list-1" })
+			await server.write({
+				authorId: "other-user",
+				ops: [
+					{ fn: "setList", args: [list] },
+					{ fn: "addTodo", args: [createTodo("list-1", { id: "todo-1", text: "After dispose" })] },
+				],
+			})
 			await sleep(10)
 
 			assert.equal(changeCount, countAfterDispose)

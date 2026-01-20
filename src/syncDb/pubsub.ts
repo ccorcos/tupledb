@@ -31,7 +31,7 @@ export function publish(db: TupleDb, pubsub: PubsubServerApi) {
 	while (true) {
 		const { items, clear } = pubsubQueue(db).dequeue()
 		if (items.length === 0) break
-		for (const { key, value } of items) pubsub.publish(key as any, value)
+		for (const { key, value } of items) pubsub.publish(JSON.stringify(key), value)
 		clear()
 	}
 }

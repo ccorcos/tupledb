@@ -5,7 +5,8 @@ The SyncDb client provides real-time synchronization between browser clients and
 ## Core Concepts
 
 - **AppDbClient** - The main client that manages server communication, caching, and pending commits
-- **SyncDbClient** - A scoped view into a specific path in the database (e.g., a single todo list)
+- **SyncDb** - A scoped view into a specific path in the database (e.g., a single todo list)
+- **SyncDbView** - A read-only view into a subspace of data (created via `subspace()`)
 - **Reducers** - Functions that define how operations modify data
 - **Commits** - Batches of operations sent to the server
 
@@ -120,14 +121,14 @@ const appDb = new AppDbClient({
 
 ### Access a Scope
 
-A `SyncDbClient` provides access to a specific path in the database:
+A `SyncDb` provides access to a specific path in the database. Creating a SyncDb automatically subscribes to pubsub and starts syncing:
 
 ```typescript
 const listId = "list-abc"
 const syncDb = appDb.getSyncDb(["todoList", listId])
 
-// Initialize fetches data from server and subscribes to updates
-await syncDb.initialize()
+// Data is empty until sync completes, then updates automatically
+// Always call destroy() when done to release resources
 ```
 
 ### Read Data
@@ -142,6 +143,10 @@ const todo = syncDb.get(["todo", "1"])
 
 // Range queries
 const todos = syncDb.list({ gte: ["todo"], lte: ["todo", []] })
+
+// Create a subspace view
+const todoView = syncDb.subspace(["todo"])
+const allTodos = todoView.list() // Keys are relative: [{ key: ["1"], value: {...} }]
 ```
 
 ### Write Data
@@ -212,7 +217,10 @@ if (failed) {
 ### Cleanup
 
 ```typescript
-// Dispose when done (e.g., on page unload)
+// Destroy the SyncDb when done (required for ref counting)
+syncDb.destroy()
+
+// Dispose the entire client when done (e.g., on page unload)
 appDb.dispose()
 ```
 
@@ -273,18 +281,15 @@ function App() {
 
 #### useSyncDb
 
-Manages a scoped view and handles initialization:
+Manages a scoped view with automatic initialization and cleanup:
 
 ```tsx
 import { useSyncDb } from "tupledb/syncDb/client/react/useSyncDb"
 
 function TodoList({ listId }: { listId: string }) {
-  const { syncDb, isInitialized, clock } = useSyncDb(["todoList", listId])
+  const { syncDb, clock } = useSyncDb(["todoList", listId])
 
-  if (!isInitialized) {
-    return <div>Loading...</div>
-  }
-
+  // Data starts empty and populates as sync completes
   const todos = syncDb.list({ gte: ["todo"], lte: ["todo", []] })
 
   return (
@@ -305,16 +310,12 @@ Reactive list with automatic re-rendering on data changes:
 import { useList } from "tupledb/syncDb/client/react/useList"
 
 function TodoList({ listId }: { listId: string }) {
-  const { syncDb, isInitialized } = useSyncDb(["todoList", listId])
-  const { local, isLoading, error } = useList(syncDb, { gte: ["todo"], lte: ["todo", []] })
-
-  if (!isInitialized || isLoading) {
-    return <div>Loading...</div>
-  }
+  const { syncDb } = useSyncDb(["todoList", listId])
+  const { data } = useList(syncDb, { gte: ["todo"], lte: ["todo", []] })
 
   return (
     <ul>
-      {local.map(({ key, value }) => (
+      {data.map(({ key, value }) => (
         <TodoItem key={key.join("/")} todo={value} />
       ))}
     </ul>
@@ -395,13 +396,11 @@ import { SyncDbProvider, useAppDb } from "./SyncDbProvider"
 type Todo = { id: string; text: string; done: boolean }
 
 function TodoApp({ listId }: { listId: string }) {
-  const { syncDb, isInitialized } = useSyncDb(["todoList", listId])
-  const { local: todos } = useList(syncDb, { gte: ["todo"], lte: ["todo", []] })
+  const { syncDb } = useSyncDb(["todoList", listId])
+  const { data: todos } = useList(syncDb, { gte: ["todo"], lte: ["todo", []] })
   const { commit } = useCommit()
   const { hasPending, hasFailed } = usePending()
   const [text, setText] = useState("")
-
-  if (!isInitialized) return <div>Loading...</div>
 
   const addTodo = (e: FormEvent) => {
     e.preventDefault()
@@ -458,7 +457,7 @@ function App() {
 
 | Method | Description |
 |--------|-------------|
-| `getSyncDb(path)` | Get a scoped SyncDbClient for a path |
+| `getSyncDb(path)` | Get a scoped SyncDb for a path (auto-initializes, ref counted) |
 | `commit(ops)` | Apply operations optimistically and sync to server |
 | `getPendingCommits()` | Get list of pending/failed commits |
 | `retryCommit(id)` | Retry a failed commit |
@@ -467,25 +466,33 @@ function App() {
 | `onStateChange(fn)` | Subscribe to state changes (returns unsubscribe fn) |
 | `dispose()` | Clean up subscriptions |
 
-### SyncDbClient
+### SyncDb
 
 | Method | Description |
 |--------|-------------|
-| `initialize()` | Fetch initial data and subscribe to updates |
-| `isInitialized()` | Check if scope has been initialized |
+| `path` | The path this SyncDb is scoped to |
+| `destroy()` | Release this SyncDb (required for cleanup) |
 | `clock()` | Get current server clock for scope |
 | `list(args?)` | List data with optional range query |
 | `get(key)` | Get a specific key |
 | `subscribe(range, fn)` | Subscribe to data changes in range |
+| `subspace(prefix)` | Get a nested SyncDbView |
 | `sync()` | Manually trigger sync with server |
-| `history(range?)` | Get commit history |
-| `data(prefix?)` | Get a subspace data view |
+
+### SyncDbView
+
+| Method | Description |
+|--------|-------------|
+| `list(args?)` | List data with optional range query (keys relative to prefix) |
+| `get(key)` | Get a specific key (relative to prefix) |
+| `subscribe(range, fn)` | Subscribe to data changes in range |
+| `subspace(prefix)` | Get a further nested SyncDbView |
 
 ### React Hooks
 
 | Hook | Returns | Description |
 |------|---------|-------------|
-| `useSyncDb(path)` | `{ syncDb, isInitialized, clock }` | Manage a scoped SyncDbClient |
-| `useList(source, args?)` | `{ local, remote, isLoading, error }` | Reactive list with loading state |
+| `useSyncDb(path)` | `{ syncDb, clock }` | Manage a scoped SyncDb with auto cleanup |
+| `useList(source, args?)` | `{ data }` | Reactive list with automatic updates |
 | `useCommit(appDb?)` | `{ commit, isSubmitting, error, clearError, retry, cancel }` | Commit operations |
 | `usePending(appDb?)` | `{ pendingIds, hasPending, hasFailed }` | Track pending commits |

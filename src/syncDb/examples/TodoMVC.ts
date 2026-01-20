@@ -1,6 +1,7 @@
-import { TupleDb } from "../../tupleDb/types"
+import { pubsubQueue } from "syncDb/pubsub"
+import { Tuple, TupleDb } from "../../tupleDb/types"
 import { syncDb } from "../syncDb"
-import { CommitMeta, ReducerMap } from "../types"
+import { CommitMeta, Op, ReducerMap } from "../types"
 
 export type TodoList = {
 	id: string
@@ -71,38 +72,30 @@ const userReducers = {
 } satisfies ReducerMap
 
 
+function writeSyncDb<R extends ReducerMap>(tx: TupleDb, path: Tuple, commit: CommitMeta, reducers: R, ops: Op<R>[]) {
+	syncDb(tx.subspace(path), reducers).apply({ ...commit, ops })
+	if (commit.commitedAt) {
+		pubsubQueue(tx).enqueue(commit.commitedAt, path, tx.get([...path, "clock"]))
+	}
+}
+
 export const todoAppReducers = {
 	setList: (tx: TupleDb, commit: CommitMeta, list: TodoList) => {
 		if (!commit.authorId) throw new Error("You need to be logged in.")
 		const userId = commit.authorId
-
-		syncDb(tx.subspace(["users", userId]), userReducers).apply({
-			...commit,
-			ops: [{ fn: "setList", args: [list] }],
-		})
-
-		syncDb(tx.subspace(["todoList", list.id]), todoListReducers).apply({
-			...commit,
-			ops: [{ fn: "setList", args: [list] }],
-		})
+		writeSyncDb(tx, ["users", userId], commit, userReducers, [{ fn: "setList", args: [list] }])
+		writeSyncDb(tx, ["todoList", list.id], commit, todoListReducers, [{ fn: "setList", args: [list] }])
 	},
 
 	// Soft delete so we can undo, so that sync works, etc.
 	removeList: (tx: TupleDb, commit: CommitMeta, listId: string) => {
 		if (!commit.authorId) throw new Error("You need to be logged in.")
 		const userId = commit.authorId
-
-		syncDb(tx.subspace(["users", userId]), userReducers).apply({
-			...commit,
-			ops: [{ fn: "removeList", args: [listId] }],
-		})
+		writeSyncDb(tx, ["users", userId], commit, userReducers, [{ fn: "removeList", args: [listId] }])
 	},
 
 	addTodo: (tx: TupleDb, commit: CommitMeta, todo: Todo) => {
-		syncDb(tx.subspace(["todoList", todo.listId]), todoListReducers).apply({
-			...commit,
-			ops: [{ fn: "setTodo", args: [todo] }],
-		})
+		writeSyncDb(tx, ["todoList", todo.listId], commit, todoListReducers, [{ fn: "setTodo", args: [todo] }])
 	},
 
 	deleteTodo: (
@@ -111,10 +104,7 @@ export const todoAppReducers = {
 		args: { listId: string; todoId: string }
 	) => {
 		const { listId, todoId } = args
-		syncDb(tx.subspace(["todoList", listId]), todoListReducers).apply({
-			...commit,
-			ops: [{ fn: "deleteTodo", args: [todoId] }],
-		})
+		writeSyncDb(tx, ["todoList", listId], commit, todoListReducers, [{ fn: "deleteTodo", args: [todoId] }])
 	},
 } satisfies ReducerMap
 

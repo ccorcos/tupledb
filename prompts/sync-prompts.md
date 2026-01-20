@@ -642,3 +642,9 @@ So when the client "subscribes" to a range, it will fetch data from the syncServ
 Lets redesign the syncDb client to consolidate state in a single place. The TupleCache can hold all of the data across all the syncDbs, in the same layout that they exist on the backend. All writes should live in a single global queue as well since writes can operate against multiple syncDbs at once. Ideally we can use the same global reducers on the backend and the frontend.
 
 It's possible that what I'm asking for has some constraints that I'm not understanding so carefully think through the intention and how we could get close to it.
+
+---
+
+I want to do a heavy refactor of the @src/syncDb/client/AppDbClient.ts abstraction. Lets get rid of anything that is not absolutely necessary. For example, syncdb.getpendingcommits is not necessary. in the same way that have okv as a base abstraction with tupledb which adds some sugar convenience methods, we should probably have the same thing here for the syncdb client type. Even things like the syncdb.initialize method feel like they're wrong. There should be some registry in the appdb client that reference counts how many syncdbs have been created but not yet destroyed. When that reference count goes to zero, we'll unsubscribe from pubsub. So appdb.syncdb will increment that counter, starting the subscription, and you have to explicitly call destroy to decrement that counter. But all the logic is centralized in the appdb around syncing, etc.
+
+---

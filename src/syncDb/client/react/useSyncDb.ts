@@ -1,12 +1,11 @@
-import { useMemo, useEffect, useState, useCallback } from "react"
-import { SyncDbClient } from "../SyncDbClient"
+import { useMemo, useEffect, useState } from "react"
+import { SyncDb } from "../AppDbClient"
 import { ReducerMap } from "../../types"
 import { Tuple } from "../../../tupleDb/types"
 import { useAppDb } from "./SyncDbProvider"
 
 export type UseSyncDbResult<R extends ReducerMap> = {
-	syncDb: SyncDbClient<R>
-	isInitialized: boolean
+	syncDb: SyncDb<R>
 	clock: number
 }
 
@@ -20,26 +19,8 @@ export function useSyncDb<R extends ReducerMap>(path: Tuple): UseSyncDbResult<R>
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [appDb, pathKey])
 
-	const isInitialized = syncDb.isInitialized()
-	const clock = syncDb.clock()
+	useEffect(() => () => syncDb.destroy(), [syncDb])
+	useEffect(() => syncDb.subscribe({}, () => forceUpdate({})), [syncDb])
 
-	const refresh = useCallback(() => forceUpdate({}), [])
-
-	useEffect(() => {
-		return syncDb.subscribe({}, refresh)
-	}, [syncDb, refresh])
-
-	useEffect(() => {
-		if (!isInitialized) {
-			syncDb.initialize().catch((error) => {
-				console.error(`Failed to initialize scope ${pathKey}:`, error)
-			})
-		}
-	}, [syncDb, pathKey, isInitialized])
-
-	return {
-		syncDb,
-		isInitialized,
-		clock,
-	}
+	return { syncDb, clock: syncDb.clock() }
 }

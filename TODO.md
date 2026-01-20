@@ -14,11 +14,20 @@ AppDbClient
 - applies optimistic writes and rebases
 
 
-Can we refactor the SyncDbClient file out of existience? We can consolidate it into the AppDbClient. Seems like it could just be a type as well, or at least it doesnt need to be a class since it doesnt encapsulate any state. The syncDbDataView looks like its just a tupleDb().subspace afterall.
+garbage collection process. cache subscribed ranges. LRU, wait some time before cleanup.
 
 
 
 
+
+
+- rename
+	appDb.getSyncDb(["todoList", listId])
+
+- no initialize...
+	reference count and dispose of syncdbs, there shuold be a registry or something?
+
+	Can you refactor AppDbClient
 
 
 
