@@ -1,6 +1,7 @@
 import { PubsubHarness } from "fixtures/PubsubHarness"
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
+import { randomId } from "shared/randomId"
 import { syncServer } from "syncDb/syncServer"
 import { tupleDb } from "../../tupleDb/TupleDb"
 import { Tuple, TupleDb } from "../../tupleDb/types"
@@ -38,18 +39,9 @@ function getHistory(db: TupleDb, scope: Tuple): Commit[] {
 // Builder Helpers - Fluent API for creating test data
 // ============================================================================
 
-let idCounter = 0
-function nextId(prefix: string = "id"): string {
-	return `${prefix}-${++idCounter}`
-}
-
-function resetIds() {
-	idCounter = 0
-}
-
 function createList(overrides: Partial<TodoList> = {}): TodoList {
 	return {
-		id: nextId("list"),
+		id: randomId(),
 		name: "My List",
 		editedAt: new Date().toISOString(),
 		...overrides,
@@ -58,7 +50,7 @@ function createList(overrides: Partial<TodoList> = {}): TodoList {
 
 function createTodo(listId: string, overrides: Partial<Todo> = {}): Todo {
 	return {
-		id: nextId("todo"),
+		id: randomId(),
 		listId,
 		text: "Do something",
 		checked: false,
@@ -122,7 +114,6 @@ function getUncheckedTodos(db: TupleDb, listId: string): string[] {
 describe("TodoMVC", () => {
 	describe("List Operations", () => {
 		it("creates a list", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1", name: "Shopping" })
 
@@ -143,7 +134,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("deletes a list", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1", name: "Shopping" })
 
@@ -161,7 +151,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("updates a list name", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1", name: "Shopping" })
 
@@ -182,7 +171,6 @@ describe("TodoMVC", () => {
 
 	describe("Todo Operations", () => {
 		it("creates a todo", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Buy milk" })
@@ -197,7 +185,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("deletes a todo", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Buy milk" })
@@ -218,7 +205,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("renames a todo", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Buy milk" })
@@ -236,7 +222,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("checks a todo", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Buy milk", checked: false })
@@ -261,7 +246,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("unchecks a todo", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", checked: true })
@@ -281,7 +265,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("reorders todos", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 
@@ -307,7 +290,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("reorders a todo between two others using fractional indexing", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 
@@ -331,7 +313,6 @@ describe("TodoMVC", () => {
 
 	describe("EditedAt Tracking", () => {
 		it("updating list editedAt updates the index", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1", editedAt: "2024-01-01T00:00:00Z" })
 
@@ -351,7 +332,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("multiple lists are ordered by editedAt", () => {
-			resetIds()
 			const { db, write } = createServer()
 
 			const list1 = createList({ id: "list-1", name: "Oldest", editedAt: "2024-01-01T00:00:00Z" })
@@ -371,7 +351,6 @@ describe("TodoMVC", () => {
 
 	describe("History Tracking", () => {
 		it("records operations in history with correct clock sequence", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 
@@ -399,7 +378,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("maintains separate history for user and list scopes", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 
@@ -419,7 +397,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("preserves author information in history", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 
@@ -435,7 +412,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("history records each modification as separate entry", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Original", checked: false })
@@ -469,7 +445,6 @@ describe("TodoMVC", () => {
 
 	describe("Edge Cases", () => {
 		it("handles deleting a non-existent todo gracefully", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 
@@ -485,7 +460,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("handles removing a non-existent list gracefully", () => {
-			resetIds()
 			const { db, write } = createServer()
 
 			// Remove list that doesn't exist - should not throw
@@ -495,7 +469,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("requires authorId for list operations", () => {
-			resetIds()
 			const { write } = createServer()
 			const list = createList({ id: "list-1" })
 
@@ -505,7 +478,6 @@ describe("TodoMVC", () => {
 		})
 
 		it("idempotent writes with same commit id", () => {
-			resetIds()
 			const { db, write } = createServer()
 			const list = createList({ id: "list-1" })
 
