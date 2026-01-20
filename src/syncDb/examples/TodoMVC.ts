@@ -1,6 +1,6 @@
-import { applySyncCommit } from "syncDb/SyncNode"
-import { CommitMeta, ReducerMap } from "syncDb/types"
-import { TupleDb } from "tupleDb/types"
+import { TupleDb } from "../../tupleDb/types"
+import { syncDb } from "../syncDb"
+import { CommitMeta, ReducerMap } from "../types"
 
 export type TodoList = {
 	id: string
@@ -76,12 +76,12 @@ export const todoAppReducers = {
 		if (!commit.authorId) throw new Error("You need to be logged in.")
 		const userId = commit.authorId
 
-		applySyncCommit(tx, ["users", userId], userReducers, {
+		syncDb(tx.subspace(["users", userId]), userReducers).apply({
 			...commit,
 			ops: [{ fn: "setList", args: [list] }],
 		})
 
-		applySyncCommit(tx, ["todoList", list.id], todoListReducers, {
+		syncDb(tx.subspace(["todoList", list.id]), todoListReducers).apply({
 			...commit,
 			ops: [{ fn: "setList", args: [list] }],
 		})
@@ -92,14 +92,14 @@ export const todoAppReducers = {
 		if (!commit.authorId) throw new Error("You need to be logged in.")
 		const userId = commit.authorId
 
-		applySyncCommit(tx, ["users", userId], userReducers, {
+		syncDb(tx.subspace(["users", userId]), userReducers).apply({
 			...commit,
 			ops: [{ fn: "removeList", args: [listId] }],
 		})
 	},
 
 	addTodo: (tx: TupleDb, commit: CommitMeta, todo: Todo) => {
-		applySyncCommit(tx, ["todoList", todo.listId], todoListReducers, {
+		syncDb(tx.subspace(["todoList", todo.listId]), todoListReducers).apply({
 			...commit,
 			ops: [{ fn: "setTodo", args: [todo] }],
 		})
@@ -111,7 +111,7 @@ export const todoAppReducers = {
 		args: { listId: string; todoId: string }
 	) => {
 		const { listId, todoId } = args
-		applySyncCommit(tx, ["todoList", listId], todoListReducers, {
+		syncDb(tx.subspace(["todoList", listId]), todoListReducers).apply({
 			...commit,
 			ops: [{ fn: "deleteTodo", args: [todoId] }],
 		})

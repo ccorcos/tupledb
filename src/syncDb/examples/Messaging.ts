@@ -1,5 +1,5 @@
-import { Tuple, TupleDb } from "../../tupleDb/types"
-import { applySyncCommit } from "../SyncNode"
+import { TupleDb } from "../../tupleDb/types"
+import { syncDb } from "../syncDb"
 import { CommitMeta, ReducerMap } from "../types"
 
 // =============================================================================
@@ -79,9 +79,8 @@ export const messagingAppReducers = {
 	set: (tx: TupleDb, commit: CommitMeta, value: User | Message) => {
 		if (value.type === "user") {
 			const user = value
-			const scope: Tuple = ["users", user.id]
 
-			applySyncCommit(tx, scope, messagingUserReducers, {
+			syncDb(tx.subspace(["users", user.id]), messagingUserReducers).apply({
 				...commit,
 				ops: [{ fn: "setProfile", args: [user] }],
 			})
@@ -89,16 +88,14 @@ export const messagingAppReducers = {
 			const msg = value
 
 			// Add to sender's outbox
-			const senderScope: Tuple = ["users", msg.from]
-			applySyncCommit(tx, senderScope, messagingUserReducers, {
+			syncDb(tx.subspace(["users", msg.from]), messagingUserReducers).apply({
 				...commit,
 				ops: [{ fn: "sendMessage", args: [msg] }],
 			})
 
 			// Add to each recipient's inbox
 			for (const userId of msg.to) {
-				const recipientScope: Tuple = ["users", userId]
-				applySyncCommit(tx, recipientScope, messagingUserReducers, {
+				syncDb(tx.subspace(["users", userId]), messagingUserReducers).apply({
 					...commit,
 					ops: [
 						{ fn: "receiveMessage", args: [msg] },
@@ -125,15 +122,13 @@ export const messagingAppReducers = {
 		if (type === "user") {
 			// Deleting a user would require more complex cleanup
 			// For now, just mark as deleted
-			const scope: Tuple = ["users", id]
-			applySyncCommit(tx, scope, messagingUserReducers, {
+			syncDb(tx.subspace(["users", id]), messagingUserReducers).apply({
 				...commit,
 				ops: [{ fn: "setProfile", args: [null] }],
 			})
 		} else if (type === "message") {
 			// Delete from the requesting user's scope only
-			const scope: Tuple = ["users", userId]
-			applySyncCommit(tx, scope, messagingUserReducers, {
+			syncDb(tx.subspace(["users", userId]), messagingUserReducers).apply({
 				...commit,
 				ops: [{ fn: "deleteMessage", args: [id] }],
 			})
@@ -147,9 +142,8 @@ export const messagingAppReducers = {
 	 */
 	markRead: (tx: TupleDb, commit: CommitMeta, args: { messageId: string; userId: string }) => {
 		const { messageId, userId } = args
-		const scope: Tuple = ["users", userId]
 
-		applySyncCommit(tx, scope, messagingUserReducers, {
+		syncDb(tx.subspace(["users", userId]), messagingUserReducers).apply({
 			...commit,
 			ops: [{ fn: "markRead", args: [messageId] }],
 		})

@@ -1,11 +1,12 @@
 import { PubsubHarness } from "fixtures/PubsubHarness"
 import { strict as assert } from "node:assert"
 import { describe, it } from "node:test"
-import { appDb, publish } from "../SyncNode"
 import { tupleDb } from "../../tupleDb/TupleDb"
 import { Tuple, TupleDb } from "../../tupleDb/types"
-import { todoAppReducers, Todo, TodoList } from "./TodoMVC"
+import { appDb } from "../appDb"
+import { publish } from "../pubsubs"
 import { Commit } from "../types"
+import { Todo, todoAppReducers, TodoList } from "./TodoMVC"
 
 // ============================================================================
 // Test Helpers
