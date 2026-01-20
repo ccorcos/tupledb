@@ -220,18 +220,12 @@ describe("AppDbClient", () => {
 			await syncDb.initialize()
 
 			assert.equal(syncDb.isInitialized(), true)
-			assert.equal(syncDb.getState().connectionStatus, "connected")
 		})
 
 		it("subscribes to pubsub on initialize", async () => {
 			const appDb = createAppDb(server, pubsub)
 			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
 			await syncDb.initialize()
-
-			let stateChanged = false
-			syncDb.onStateChange(() => {
-				stateChanged = true
-			})
 
 			// External commit
 			await server.write({
@@ -486,25 +480,25 @@ describe("AppDbClient", () => {
 			assert.ok(changeCount > 0)
 		})
 
-		it("scope state changes are isolated", async () => {
+		it("data subscriptions notify on data changes", async () => {
 			const appDb = createAppDb(server, pubsub)
 			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
-			const syncDb2 = appDb.getSyncDb(["todoList", "list-2"])
 
-			let scope1Changes = 0
-			let scope2Changes = 0
-
-			syncDb1.onStateChange(() => {
-				scope1Changes++
-			})
-			syncDb2.onStateChange(() => {
-				scope2Changes++
+			let changeCount = 0
+			syncDb1.subscribe({}, () => {
+				changeCount++
 			})
 
 			await syncDb1.initialize()
 
-			assert.ok(scope1Changes > 0)
-			assert.equal(scope2Changes, 0)
+			await appDb.commit([
+				{
+					fn: "setTodo",
+					args: [{ id: "todo-1", text: "List 1 Todo", checked: false, listId: "list-1" }],
+				},
+			])
+
+			assert.ok(changeCount > 0)
 		})
 	})
 

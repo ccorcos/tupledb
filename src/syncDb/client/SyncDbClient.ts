@@ -2,7 +2,7 @@ import { Range } from "../../tupleDb/Range"
 import { CacheListResult, JSONValue, ListArgs, Tuple } from "../../tupleDb/types"
 import { ReducerMap } from "../types"
 import { AppDbClient } from "./AppDbClient"
-import { ConfirmedCommit, HistoryEntry, PendingCommit, ScopeState } from "./types"
+import { ConfirmedCommit, HistoryEntry, PendingCommit } from "./types"
 
 export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 	readonly path: Tuple
@@ -16,16 +16,16 @@ export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 		this.dataPrefix = [...path, "data"]
 	}
 
-	getState(): Readonly<ScopeState> {
-		return this.appDb.getState(this.path)
-	}
-
 	clock(): number {
-		return this.getState().confirmedClock
+		return this.appDb.getClock(this.path)
 	}
 
 	isInitialized(): boolean {
-		return this.getState().initialized
+		const result = this.appDb.list({
+			gte: [...this.path, "clock"],
+			lte: [...this.path, "clock"],
+		})
+		return result.length > 0
 	}
 
 	getPendingCommits(): readonly PendingCommit<R>[] {
@@ -50,17 +50,16 @@ export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 
 	history(range?: { sinceClock?: number; limit?: number }): HistoryEntry<R>[] {
 		const entries: HistoryEntry<R>[] = []
-		const confirmedRange: ListArgs<number> = {}
-		if (range?.sinceClock !== undefined) {
-			confirmedRange.gt = range.sinceClock
-		}
-		if (range?.limit !== undefined) {
-			confirmedRange.limit = range.limit
-		}
-		const history = this.appDb._getScopeHistory(this.path)
-		const confirmed = history.list(confirmedRange)
+		const historyPrefix = [...this.path, "history"]
+
+		const listArgs: ListArgs<Tuple> =
+			range?.sinceClock !== undefined
+				? { gt: [...historyPrefix, range.sinceClock], lte: [...historyPrefix, []], limit: range?.limit }
+				: { gte: historyPrefix, lte: [...historyPrefix, []], limit: range?.limit }
+
+		const confirmed = this.appDb.list(listArgs)
 		for (const { value } of confirmed) {
-			entries.push({ type: "confirmed", commit: value })
+			entries.push({ type: "confirmed", commit: value as ConfirmedCommit<R> })
 		}
 		for (const commit of this.appDb.getPendingCommits()) {
 			entries.push({ type: "pending", commit })
@@ -75,10 +74,6 @@ export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 	subscribe(range: Range<Tuple>, fn: () => void): () => void {
 		const fullRange = this.encodeRange(range)
 		return this.appDb.subscribe(fullRange, fn)
-	}
-
-	onStateChange(fn: () => void): () => void {
-		return this.appDb.onScopeStateChange(this.path, fn)
 	}
 
 	async initialize(): Promise<void> {

@@ -19,13 +19,6 @@ export type HistoryEntry<R extends ReducerMap = ReducerMap> =
 	| { type: "pending"; commit: PendingCommit<R> }
 	| { type: "confirmed"; commit: ConfirmedCommit<R> }
 
-export type ScopeState = {
-	confirmedClock: number
-	initialized: boolean
-	fetching: boolean
-	connectionStatus: "connected" | "disconnected" | "reconnecting"
-	lastError?: Error
-}
 
 export type PubsubApi = {
 	subscribe(key: string): void

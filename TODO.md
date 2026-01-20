@@ -5,17 +5,17 @@ HERE: HumanTodoMVC
 - make some simple tests for humantodomvc
 - get the client cache working along with sync and test it.
 
-- add appdb and syncdb to readme/claude.md
-
-
-Include the appDb and syncDb abstractions in Readme.md, Claude.md, docs/getting-started.md and docs/architecture.md But don't worry about syncDb/client abstractions just yet.
-
 
 In the AppDbClient, it seems redundant to keep track of the syncDb clocks outside of the cache itself. Since we're applying reducers, we need the clock to be available in the cache. In fact, the entire ScopeState feels a bit unnecessary. Is there a way to refactor this code to be simpler and more consider? Same with the SyncDbClient as well.
 
 
+TODO: see if we can get Claude to massage this thing into a shape we can use. Otherwise, lets continue with TodoMVC.test.ts and createClient and go from there.
+- resetIds, just use randomId()
 
-
+AppDbClient
+- cache with data
+- reference counts subscriptions to clocks
+- applies optimistic writes and rebases
 
 
 

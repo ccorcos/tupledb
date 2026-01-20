@@ -7,23 +7,8 @@ import { tupleDb } from "../../tupleDb/TupleDb"
 import { JSONValue, ListArgs, Tuple, TupleDb, WriteArgs } from "../../tupleDb/types"
 import { Commit, CommitMeta, Op, ReducerMap } from "../types"
 import { SyncDbClient } from "./SyncDbClient"
-import {
-	AppDbClientOptions,
-	AppServerApi,
-	ConfirmedCommit,
-	PendingCommit,
-	PubsubApi,
-	ScopeState,
-} from "./types"
+import { AppDbClientOptions, AppServerApi, ConfirmedCommit, PendingCommit, PubsubApi } from "./types"
 
-function defaultScopeState(): ScopeState {
-	return {
-		confirmedClock: 0,
-		initialized: false,
-		fetching: false,
-		connectionStatus: "disconnected",
-	}
-}
 
 function encodeSubspaceArgs(args: ListArgs<Tuple>, prefix: Tuple): ListArgs<Tuple> {
 	return {
@@ -66,10 +51,8 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 	private optimisticTx: Transaction<Tuple, JSONValue>
 	private pendingCommits: PendingCommit<R>[] = []
 	private localSeqCounter = 0
-	private scopes = new Map<string, ScopeState>()
-	private scopeHistory = new Map<string, InMemoryOkv<number, ConfirmedCommit<R>>>()
+	private scopeFetching = new Set<string>()
 	private stateListeners = new Set<() => void>()
-	private scopeListeners = new Map<string, Set<() => void>>()
 	private unsubscribePubsub?: () => void
 	private subscribedScopes = new Set<string>()
 
@@ -89,11 +72,6 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 
 	getSyncDb(path: Tuple): SyncDbClient<R> {
 		return new SyncDbClient(this, path)
-	}
-
-	getState(path: Tuple): Readonly<ScopeState> {
-		const key = JSON.stringify(path)
-		return this.scopes.get(key) ?? defaultScopeState()
 	}
 
 	getPendingCommits(): readonly PendingCommit<R>[] {
@@ -183,33 +161,28 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 
 	async initializeScope(path: Tuple): Promise<void> {
 		const key = JSON.stringify(path)
-		const state = this.scopes.get(key)
-		if (state?.initialized) return
+		if (this.subscribedScopes.has(key)) return
 
 		this.pubsub.subscribe(key)
 		this.subscribedScopes.add(key)
-
-		this.updateScopeState(path, { connectionStatus: "connected" })
 		await this.syncScope(path)
-		this.updateScopeState(path, { initialized: true })
 	}
 
 	async syncScope(path: Tuple): Promise<void> {
 		const key = JSON.stringify(path)
-		const state = this.scopes.get(key) ?? defaultScopeState()
-		if (state.fetching) return
+		if (this.scopeFetching.has(key)) return
 
-		this.updateScopeState(path, { fetching: true })
+		this.scopeFetching.add(key)
 
 		try {
-			const historyResult = await this.server.history(path, state.confirmedClock)
+			const currentClock = this.getClock(path)
+			const historyResult = await this.server.history(path, currentClock)
 			const dataResult = await this.server.list(path, {})
 
-			const history = this.getScopeHistory(path)
 			for (const commit of historyResult.commits) {
 				const wasPending = this.pendingCommits.some((p) => p.id === commit.id)
 				const confirmed: ConfirmedCommit<R> = { ...(commit as Commit<R>), isLocal: wasPending }
-				history.write({ set: [{ key: commit.clock, value: confirmed }] })
+				this.data.write({ set: [{ key: [...path, "history", commit.clock], value: confirmed }] })
 				if (wasPending) {
 					this.removePendingCommit(commit.id)
 				}
@@ -228,6 +201,9 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 				})),
 			})
 
+			const newClock = Math.max(currentClock, historyResult.clock, dataResult.clock)
+			this.data.write({ set: [{ key: [...path, "clock"], value: newClock }] })
+
 			this.cache.insert([
 				{
 					args: { gte: dataPrefix, lte: [...dataPrefix, []] },
@@ -239,18 +215,15 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 			])
 
 			this.rebuildOptimisticState()
-
-			this.updateScopeState(path, {
-				confirmedClock: Math.max(state.confirmedClock, historyResult.clock, dataResult.clock),
-				fetching: false,
-			})
-		} catch (error) {
-			this.updateScopeState(path, {
-				fetching: false,
-				lastError: error instanceof Error ? error : new Error(String(error)),
-			})
-			throw error
+			this.emitDataChanges()
+		} finally {
+			this.scopeFetching.delete(key)
 		}
+	}
+
+	getClock(path: Tuple): number {
+		const result = this.data.list({ gte: [...path, "clock"], lte: [...path, "clock"] })
+		return (result.at(0)?.value as number) || 0
 	}
 
 	subscribe(range: { gte?: Tuple; lte?: Tuple; gt?: Tuple; lt?: Tuple }, fn: () => void): () => void {
@@ -262,17 +235,6 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 		return () => this.stateListeners.delete(fn)
 	}
 
-	onScopeStateChange(path: Tuple, fn: () => void): () => void {
-		const key = JSON.stringify(path)
-		let listeners = this.scopeListeners.get(key)
-		if (!listeners) {
-			listeners = new Set()
-			this.scopeListeners.set(key, listeners)
-		}
-		listeners.add(fn)
-		return () => listeners!.delete(fn)
-	}
-
 	dispose(): void {
 		if (this.unsubscribePubsub) {
 			this.unsubscribePubsub()
@@ -281,7 +243,6 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 			this.pubsub.unsubscribe(key)
 		}
 		this.stateListeners.clear()
-		this.scopeListeners.clear()
 	}
 
 	// Internal methods used by SyncDbClient
@@ -292,27 +253,6 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 
 	_getOptimisticTx(): Transaction<Tuple, JSONValue> {
 		return this.optimisticTx
-	}
-
-	_getScopeHistory(path: Tuple): InMemoryOkv<number, ConfirmedCommit<R>> {
-		return this.getScopeHistory(path)
-	}
-
-	private getScopeHistory(path: Tuple): InMemoryOkv<number, ConfirmedCommit<R>> {
-		const key = JSON.stringify(path)
-		let history = this.scopeHistory.get(key)
-		if (!history) {
-			history = new InMemoryOkv<number, ConfirmedCommit<R>>((a, b) => a - b)
-			this.scopeHistory.set(key, history)
-		}
-		return history
-	}
-
-	private updateScopeState(path: Tuple, partial: Partial<ScopeState>): void {
-		const key = JSON.stringify(path)
-		const state = this.scopes.get(key) ?? defaultScopeState()
-		this.scopes.set(key, { ...state, ...partial })
-		this.notifyScopeStateChange(path)
 	}
 
 	private applyCommitOptimistically(commit: PendingCommit<R>): void {
@@ -417,11 +357,10 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 	}
 
 	private async handleClockUpdate(key: string, newClock: number): Promise<void> {
-		const state = this.scopes.get(key)
-		if (!state) return
-		if (newClock <= state.confirmedClock) return
-
+		if (!this.subscribedScopes.has(key)) return
 		const path = JSON.parse(key) as Tuple
+		const currentClock = this.getClock(path)
+		if (newClock <= currentClock) return
 		await this.syncScope(path)
 	}
 
@@ -429,17 +368,6 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 		for (const listener of this.stateListeners) {
 			listener()
 		}
-	}
-
-	private notifyScopeStateChange(path: Tuple): void {
-		const key = JSON.stringify(path)
-		const listeners = this.scopeListeners.get(key)
-		if (listeners) {
-			for (const listener of listeners) {
-				listener()
-			}
-		}
-		this.notifyStateChange()
 	}
 
 	private emitDataChanges(): void {
