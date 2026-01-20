@@ -196,14 +196,18 @@ describe("AppDbClient", () => {
 
 			await syncDb.initialize()
 
-			await appDb.commit([
+			appDb.commit([
 				{ fn: "setList", args: [list] },
 				{ fn: "addTodo", args: [todo] },
 			])
 
+			// Data is visible optimistically immediately
 			const todos = getTodos(syncDb)
 			assert.equal(todos.length, 1)
 			assert.equal(todos[0].text, "Test")
+
+			// Wait for server confirmation
+			await appDb.flush()
 			assert.equal(appDb.getPendingCommits().length, 0)
 		})
 
@@ -217,10 +221,13 @@ describe("AppDbClient", () => {
 
 			server.delay = 100
 
-			const commitPromise = appDb.commit([
+			appDb.commit([
 				{ fn: "setList", args: [list] },
 				{ fn: "addTodo", args: [todo] },
 			])
+
+			// Give time for status to transition to submitting
+			await sleep(5)
 
 			const pending = appDb.getPendingCommits()
 			assert.equal(pending.length, 1)
@@ -230,7 +237,7 @@ describe("AppDbClient", () => {
 			const todos = getTodos(syncDb)
 			assert.equal(todos.length, 1)
 
-			await commitPromise
+			await appDb.flush()
 			assert.equal(appDb.getPendingCommits().length, 0)
 		})
 
@@ -247,13 +254,14 @@ describe("AppDbClient", () => {
 			const todo1 = createTodo("list-1", { id: "todo-1", text: "List 1 Todo" })
 			const todo2 = createTodo("list-2", { id: "todo-2", text: "List 2 Todo" })
 
-			await appDb.commit([
+			appDb.commit([
 				{ fn: "setList", args: [list1] },
 				{ fn: "setList", args: [list2] },
 				{ fn: "addTodo", args: [todo1] },
 				{ fn: "addTodo", args: [todo2] },
 			])
 
+			// Data is visible optimistically immediately
 			const todos1 = getTodos(syncDb1)
 			assert.equal(todos1.length, 1)
 			assert.equal(todos1[0].text, "List 1 Todo")
@@ -261,6 +269,8 @@ describe("AppDbClient", () => {
 			const todos2 = getTodos(syncDb2)
 			assert.equal(todos2.length, 1)
 			assert.equal(todos2[0].text, "List 2 Todo")
+
+			await appDb.flush()
 		})
 	})
 
@@ -276,16 +286,13 @@ describe("AppDbClient", () => {
 			server.shouldFail = true
 			server.failMessage = "Network error"
 
-			try {
-				await appDb.commit([
-					{ fn: "setList", args: [list] },
-					{ fn: "addTodo", args: [todo] },
-				])
-				assert.fail("Should have thrown")
-			} catch (e) {
-				assert.ok(e instanceof Error)
-				assert.equal(e.message, "Network error")
-			}
+			appDb.commit([
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
+			])
+
+			// Wait for background sync to fail
+			await appDb.flush()
 
 			const pending = appDb.getPendingCommits()
 			assert.equal(pending.length, 1)
@@ -303,19 +310,18 @@ describe("AppDbClient", () => {
 
 			server.shouldFail = true
 
-			try {
-				await appDb.commit([
-					{ fn: "setList", args: [list] },
-					{ fn: "addTodo", args: [todo] },
-				])
-			} catch {
-				// Expected
-			}
+			appDb.commit([
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
+			])
+
+			await appDb.flush()
 
 			const pending = appDb.getPendingCommits()[0]
 			server.shouldFail = false
 
-			await appDb.retryCommit(pending.id)
+			appDb.retryCommit(pending.id)
+			await appDb.flush()
 			assert.equal(appDb.getPendingCommits().length, 0)
 		})
 
@@ -329,14 +335,12 @@ describe("AppDbClient", () => {
 
 			server.shouldFail = true
 
-			try {
-				await appDb.commit([
-					{ fn: "setList", args: [list] },
-					{ fn: "addTodo", args: [todo] },
-				])
-			} catch {
-				// Expected
-			}
+			appDb.commit([
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
+			])
+
+			await appDb.flush()
 
 			const pending = appDb.getPendingCommits()[0]
 			appDb.cancelCommit(pending.id)
@@ -355,7 +359,7 @@ describe("AppDbClient", () => {
 
 			await syncDb.initialize()
 
-			await appDb.commit([
+			appDb.commit([
 				{ fn: "setList", args: [list] },
 				{ fn: "addTodo", args: [todo] },
 			])
@@ -363,6 +367,8 @@ describe("AppDbClient", () => {
 			const todos = getTodos(syncDb)
 			assert.equal(todos.length, 1)
 			assert.equal(todos[0].id, "todo-1")
+
+			await appDb.flush()
 		})
 
 		it("can get specific key", async () => {
@@ -373,7 +379,7 @@ describe("AppDbClient", () => {
 
 			await syncDb.initialize()
 
-			await appDb.commit([
+			appDb.commit([
 				{ fn: "setList", args: [list] },
 				{ fn: "addTodo", args: [todo] },
 			])
@@ -381,6 +387,8 @@ describe("AppDbClient", () => {
 			const value = syncDb.get(["todo", "todo-1"])
 			assert.ok(value)
 			assert.equal(value.text, "Test")
+
+			await appDb.flush()
 		})
 
 		it("different scopes are isolated", async () => {
@@ -394,13 +402,15 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "List 1" })
 
-			await appDb.commit([
+			appDb.commit([
 				{ fn: "setList", args: [list] },
 				{ fn: "addTodo", args: [todo] },
 			])
 
 			assert.equal(getTodos(syncDb1).length, 1)
 			assert.equal(getTodos(syncDb2).length, 0)
+
+			await appDb.flush()
 		})
 	})
 
@@ -419,12 +429,14 @@ describe("AppDbClient", () => {
 
 			await syncDb.initialize()
 
-			await appDb.commit([
+			appDb.commit([
 				{ fn: "setList", args: [list] },
 				{ fn: "addTodo", args: [todo] },
 			])
 
 			assert.ok(changeCount > 0)
+
+			await appDb.flush()
 		})
 
 		it("data subscriptions notify on data changes", async () => {
@@ -441,12 +453,14 @@ describe("AppDbClient", () => {
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "List 1 Todo" })
 
-			await appDb.commit([
+			appDb.commit([
 				{ fn: "setList", args: [list] },
 				{ fn: "addTodo", args: [todo] },
 			])
 
 			assert.ok(changeCount > 0)
+
+			await appDb.flush()
 		})
 	})
 

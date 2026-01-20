@@ -22,6 +22,12 @@ AppDbClient
 
 
 
+whats the whole lifecycle on the client? lets make sure the code follows that clearly.
+React hooks
+Rebasing commits?
+
+
+
 
 
 

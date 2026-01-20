@@ -1,3 +1,11 @@
+import {
+	EncodeSubspaceListArgs,
+	KeyDecodeCacheListResult,
+	KeyDecodeList,
+	KeyEncodeRange,
+	TupleSubspaceEncoder,
+	Encoder,
+} from "../../tupleDb/Encoder"
 import { Range } from "../../tupleDb/Range"
 import { CacheListResult, JSONValue, ListArgs, Tuple } from "../../tupleDb/types"
 import { ReducerMap } from "../types"
@@ -9,11 +17,13 @@ export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 
 	private appDb: AppDbClient<R>
 	private dataPrefix: Tuple
+	private encoder: Encoder<Tuple, Tuple>
 
 	constructor(appDb: AppDbClient<R>, path: Tuple) {
 		this.appDb = appDb
 		this.path = path
 		this.dataPrefix = [...path, "data"]
+		this.encoder = TupleSubspaceEncoder(this.dataPrefix)
 	}
 
 	clock(): number {
@@ -33,9 +43,9 @@ export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 	}
 
 	list(args?: ListArgs<Tuple>): { key: Tuple; value: JSONValue }[] {
-		const fullArgs = this.encodeArgs(args)
+		const fullArgs = EncodeSubspaceListArgs(args ?? {}, this.dataPrefix)
 		const result = this.appDb._getOptimisticTx().list(fullArgs)
-		return this.decodeResult(result)
+		return KeyDecodeList(result, this.encoder)
 	}
 
 	get(key: Tuple): JSONValue | undefined {
@@ -43,9 +53,9 @@ export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 	}
 
 	cacheStatus(args?: ListArgs<Tuple>): CacheListResult<Tuple, JSONValue> {
-		const fullArgs = this.encodeArgs(args)
+		const fullArgs = EncodeSubspaceListArgs(args ?? {}, this.dataPrefix)
 		const result = this.appDb._getCache().list(fullArgs)
-		return this.decodeCacheResult(result)
+		return KeyDecodeCacheListResult(result, this.encoder)
 	}
 
 	history(range?: { sinceClock?: number; limit?: number }): HistoryEntry<R>[] {
@@ -72,7 +82,7 @@ export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 	}
 
 	subscribe(range: Range<Tuple>, fn: () => void): () => void {
-		const fullRange = this.encodeRange(range)
+		const fullRange = KeyEncodeRange(range, this.encoder)
 		return this.appDb.subscribe(fullRange, fn)
 	}
 
@@ -84,84 +94,6 @@ export class SyncDbClient<R extends ReducerMap = ReducerMap> {
 		return this.appDb.syncScope(this.path)
 	}
 
-	private encodeArgs(args?: ListArgs<Tuple>): ListArgs<Tuple> {
-		if (!args) return { gte: this.dataPrefix, lte: [...this.dataPrefix, []] }
-		return {
-			...args,
-			gt: args.gt ? [...this.dataPrefix, ...args.gt] : undefined,
-			gte: args.gte ? [...this.dataPrefix, ...args.gte] : args.gt ? undefined : this.dataPrefix,
-			lt: args.lt ? [...this.dataPrefix, ...args.lt] : undefined,
-			lte: args.lte
-				? [...this.dataPrefix, ...args.lte]
-				: args.lt
-					? undefined
-					: [...this.dataPrefix, []],
-		}
-	}
-
-	private decodeResult(result: { key: Tuple; value: JSONValue }[]): { key: Tuple; value: JSONValue }[] {
-		return result
-			.filter(({ key }) => {
-				for (let i = 0; i < this.dataPrefix.length; i++) {
-					if (key[i] !== this.dataPrefix[i]) return false
-				}
-				return true
-			})
-			.map(({ key, value }) => ({
-				key: key.slice(this.dataPrefix.length),
-				value,
-			}))
-	}
-
-	private decodeCacheResult(
-		result: CacheListResult<Tuple, JSONValue>
-	): CacheListResult<Tuple, JSONValue> {
-		if (result.miss) return result
-		if (result.prefix) {
-			return {
-				prefix: result.prefix
-					.filter(({ key }) => {
-						for (let i = 0; i < this.dataPrefix.length; i++) {
-							if (key[i] !== this.dataPrefix[i]) return false
-						}
-						return true
-					})
-					.map(({ key, value }) => ({
-						key: key.slice(this.dataPrefix.length),
-						value,
-					})),
-			}
-		}
-		if (result.hit) {
-			return {
-				hit: result.hit
-					.filter(({ key }) => {
-						for (let i = 0; i < this.dataPrefix.length; i++) {
-							if (key[i] !== this.dataPrefix[i]) return false
-						}
-						return true
-					})
-					.map(({ key, value }) => ({
-						key: key.slice(this.dataPrefix.length),
-						value,
-					})),
-			}
-		}
-		return result
-	}
-
-	private encodeRange(range: Range<Tuple>): Range<Tuple> {
-		return {
-			gt: range.gt ? [...this.dataPrefix, ...range.gt] : undefined,
-			gte: range.gte ? [...this.dataPrefix, ...range.gte] : range.gt ? undefined : this.dataPrefix,
-			lt: range.lt ? [...this.dataPrefix, ...range.lt] : undefined,
-			lte: range.lte
-				? [...this.dataPrefix, ...range.lte]
-				: range.lt
-					? undefined
-					: [...this.dataPrefix, []],
-		}
-	}
 }
 
 export type SyncDbDataView = {
@@ -175,39 +107,12 @@ export function syncDbDataView<R extends ReducerMap>(
 	parent: SyncDbClient<R>,
 	prefix: Tuple
 ): SyncDbDataView {
-	const encodeArgs = (args?: ListArgs<Tuple>): ListArgs<Tuple> => {
-		if (!args) return { gte: prefix, lte: [...prefix, []] }
-		return {
-			...args,
-			gt: args.gt ? [...prefix, ...args.gt] : undefined,
-			gte: args.gte ? [...prefix, ...args.gte] : args.gt ? undefined : prefix,
-			lt: args.lt ? [...prefix, ...args.lt] : undefined,
-			lte: args.lte ? [...prefix, ...args.lte] : args.lt ? undefined : [...prefix, []],
-		}
-	}
-
-	const decodeResult = (result: { key: Tuple; value: JSONValue }[]) => {
-		return result
-			.filter(({ key }) => {
-				for (let i = 0; i < prefix.length; i++) {
-					if (key[i] !== prefix[i]) return false
-				}
-				return true
-			})
-			.map(({ key, value }) => ({ key: key.slice(prefix.length), value }))
-	}
-
-	const encodeRange = (range: Range<Tuple>): Range<Tuple> => ({
-		gt: range.gt ? [...prefix, ...range.gt] : undefined,
-		gte: range.gte ? [...prefix, ...range.gte] : range.gt ? undefined : prefix,
-		lt: range.lt ? [...prefix, ...range.lt] : undefined,
-		lte: range.lte ? [...prefix, ...range.lte] : range.lt ? undefined : [...prefix, []],
-	})
+	const encoder = TupleSubspaceEncoder(prefix)
 
 	return {
-		list: (args) => decodeResult(parent.list(encodeArgs(args))),
-		get: (key) => decodeResult(parent.list(encodeArgs({ gte: key, lte: key }))).at(0)?.value,
+		list: (args) => KeyDecodeList(parent.list(EncodeSubspaceListArgs(args ?? {}, prefix)), encoder),
+		get: (key) => parent.list({ gte: [...prefix, ...key], lte: [...prefix, ...key] }).at(0)?.value,
 		subspace: (subPrefix) => syncDbDataView(parent, [...prefix, ...subPrefix]),
-		subscribe: (range, fn) => parent.subscribe(encodeRange(range), fn),
+		subscribe: (range, fn) => parent.subscribe(KeyEncodeRange(range, encoder), fn),
 	}
 }

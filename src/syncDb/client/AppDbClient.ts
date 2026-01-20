@@ -1,10 +1,11 @@
+import { applyCommit } from "syncDb/appDb"
 import { randomId } from "../../shared/randomId"
 import { codec } from "../../tupleDb/Codec"
 import { OkvCache } from "../../tupleDb/OkvCache"
 import { Transaction } from "../../tupleDb/Transaction"
 import { tupleDb } from "../../tupleDb/TupleDb"
 import { JSONValue, ListArgs, Tuple } from "../../tupleDb/types"
-import { Commit, CommitMeta, Op, ReducerMap } from "../types"
+import { Commit, Op, ReducerMap } from "../types"
 import { SyncDbClient } from "./SyncDbClient"
 import { AppDbClientOptions, AppServerApi, ConfirmedCommit, PendingCommit, PubsubApi } from "./types"
 
@@ -48,7 +49,7 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 		return this.optimisticTx.list(args)
 	}
 
-	async commit(ops: Op<R>[]): Promise<void> {
+	commit(ops: Op<R>[]): void {
 		const id = randomId()
 		const createdAt = new Date().toISOString()
 		const pending: PendingCommit<R> = {
@@ -60,20 +61,33 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 			status: "pending",
 		}
 
-		this.applyCommitOptimistically(pending)
+		this.applyOptimistic(pending)
 		this.pendingCommits.push(pending)
 		this.notifyStateChange()
 		this.emitDataChanges()
 
+		this.syncInBackground(pending)
+	}
+
+	async flush(): Promise<void> {
+		while (this.pendingCommits.some((c) => c.status === "pending" || c.status === "submitting")) {
+			await new Promise((resolve) => setTimeout(resolve, 10))
+		}
+	}
+
+	private async syncInBackground(pending: PendingCommit<R>): Promise<void> {
 		try {
 			pending.status = "submitting"
+			this.notifyStateChange()
+
 			await this.server.write({
 				id: pending.id,
 				authorId: pending.authorId,
 				createdAt: pending.createdAt,
 				ops: pending.ops as { fn: string; args: any[] }[],
 			})
-			this.applyCommitToConfirmedData(pending)
+
+			this.applyToConfirmed(pending)
 			this.removePendingCommit(pending.id)
 			this.rebuildOptimisticState()
 			this.notifyStateChange()
@@ -82,36 +96,20 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 			pending.status = "failed"
 			pending.error = error instanceof Error ? error.message : String(error)
 			this.notifyStateChange()
-			throw error
 		}
 	}
 
-	async retryCommit(commitId: string): Promise<void> {
+	retryCommit(commitId: string): void {
 		const pending = this.pendingCommits.find((c) => c.id === commitId)
 		if (!pending) throw new Error(`Commit not found: ${commitId}`)
 		if (pending.status !== "failed") throw new Error(`Commit is not failed: ${commitId}`)
 		pending.status = "pending"
 		pending.error = undefined
+		this.rebuildOptimisticState()
+		this.notifyStateChange()
+		this.emitDataChanges()
 
-		try {
-			pending.status = "submitting"
-			await this.server.write({
-				id: pending.id,
-				authorId: pending.authorId,
-				createdAt: pending.createdAt,
-				ops: pending.ops as { fn: string; args: any[] }[],
-			})
-			this.applyCommitToConfirmedData(pending)
-			this.removePendingCommit(pending.id)
-			this.rebuildOptimisticState()
-			this.notifyStateChange()
-			this.emitDataChanges()
-		} catch (error) {
-			pending.status = "failed"
-			pending.error = error instanceof Error ? error.message : String(error)
-			this.notifyStateChange()
-			throw error
-		}
+		this.syncInBackground(pending)
 	}
 
 	cancelCommit(commitId: string): void {
@@ -224,35 +222,16 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 		return this.optimisticTx
 	}
 
-	private applyCommitOptimistically(commit: PendingCommit<R>): void {
-		const meta: CommitMeta = {
-			id: commit.id,
-			authorId: commit.authorId,
-			createdAt: commit.createdAt,
-		}
+	private applyOptimistic(commit: PendingCommit<R>): void {
+		const meta = { id: commit.id, authorId: commit.authorId, createdAt: commit.createdAt }
 		const db = tupleDb(this.optimisticTx)
-		for (const op of commit.ops) {
-			const reducer = this.reducers[op.fn as keyof R]
-			if (!reducer) {
-				console.warn(`Unknown operation: ${String(op.fn)}`)
-				continue
-			}
-			reducer(db, meta, ...op.args)
-		}
+		applyCommit(db, this.reducers, meta, commit.ops)
 	}
 
-	private applyCommitToConfirmedData(commit: PendingCommit<R>): void {
-		const meta: CommitMeta = {
-			id: commit.id,
-			authorId: commit.authorId,
-			createdAt: commit.createdAt,
-		}
+	private applyToConfirmed(commit: PendingCommit<R>): void {
+		const meta = { id: commit.id, authorId: commit.authorId, createdAt: commit.createdAt }
 		const db = tupleDb(this.cache.data)
-		for (const op of commit.ops) {
-			const reducer = this.reducers[op.fn as keyof R]
-			if (!reducer) continue
-			reducer(db, meta, ...op.args)
-		}
+		applyCommit(db, this.reducers, meta, commit.ops)
 	}
 
 	private removePendingCommit(id: string): void {
@@ -266,7 +245,7 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 		this.optimisticTx = new Transaction(this.cache.data)
 		for (const commit of this.pendingCommits) {
 			if (commit.status !== "failed") {
-				this.applyCommitOptimistically(commit)
+				this.applyOptimistic(commit)
 			}
 		}
 	}

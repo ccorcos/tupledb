@@ -1,6 +1,6 @@
 import { randomId } from "../shared/randomId"
 import { ListArgs, Tuple, TupleDb } from "../tupleDb/types"
-import { CommitArgs, CommitMeta, ReducerMap } from "./types"
+import { CommitArgs, CommitMeta, Op, ReducerMap } from "./types"
 
 export function appDb(db: TupleDb, reducers: ReducerMap) {
 	return {
@@ -27,12 +27,23 @@ export function appDb(db: TupleDb, reducers: ReducerMap) {
 				createdAt: commit.createdAt,
 			}
 
-			for (const op of commit.ops) {
-				const reducer = reducers[op.fn]
-				if (!reducer) throw new Error(`Unknown operation: ${op.fn}`)
-				reducer(db, meta, ...op.args)
-			}
+			applyCommit(db, reducers, meta, commit.ops)
+
 
 		},
+	}
+}
+
+
+export function applyCommit<R extends ReducerMap>(
+	db: TupleDb,
+	reducers: R,
+	meta: CommitMeta,
+	ops: Op<R>[]
+): void {
+	for (const op of ops) {
+		const reducer = reducers[op.fn as keyof R]
+		if (!reducer) throw new Error(`Unknown operation: ${op.fn as string}`)
+		reducer(db, meta, ...op.args)
 	}
 }
