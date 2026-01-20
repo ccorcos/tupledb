@@ -1,18 +1,13 @@
-import { useState, useEffect, useMemo } from "react"
-import { SyncDb, SyncDbView } from "../AppDbClient"
+import { useEffect, useMemo, useState } from "react"
 import { JSONValue, ListArgs, Tuple } from "../../../tupleDb/types"
-import { ReducerMap } from "../../types"
+import { SyncDbClient, SyncDbClientView } from "../AppDbClient"
 
 export type UseListResult<T = { key: Tuple; value: JSONValue }> = {
 	data: T[]
 }
 
-function isSyncDb<R extends ReducerMap>(source: SyncDb<R> | SyncDbView): source is SyncDb<R> {
-	return "sync" in source && "destroy" in source
-}
-
-export function useList<R extends ReducerMap, T = { key: Tuple; value: JSONValue }>(
-	source: SyncDb<R> | SyncDbView,
+export function useList<T = { key: Tuple; value: JSONValue }>(
+	source: SyncDbClient | SyncDbClientView,
 	args?: ListArgs<Tuple>
 ): UseListResult<T> {
 	const [, forceUpdate] = useState({})

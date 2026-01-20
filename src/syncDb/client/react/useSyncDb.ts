@@ -1,21 +1,20 @@
-import { useMemo, useEffect, useState } from "react"
-import { SyncDb } from "../AppDbClient"
-import { ReducerMap } from "../../types"
+import { useEffect, useMemo, useState } from "react"
 import { Tuple } from "../../../tupleDb/types"
+import { SyncDbClient } from "../AppDbClient"
 import { useAppDb } from "./SyncDbProvider"
 
-export type UseSyncDbResult<R extends ReducerMap> = {
-	syncDb: SyncDb<R>
+export type UseSyncDbResult = {
+	syncDb: SyncDbClient
 	clock: number
 }
 
-export function useSyncDb<R extends ReducerMap>(path: Tuple): UseSyncDbResult<R> {
-	const appDb = useAppDb<R>()
+export function useSyncDb(path: Tuple): UseSyncDbResult {
+	const appDb = useAppDb()
 	const pathKey = JSON.stringify(path)
 	const [, forceUpdate] = useState({})
 
 	const syncDb = useMemo(() => {
-		return appDb.getSyncDb(path)
+		return appDb.syncDb(path)
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [appDb, pathKey])
 

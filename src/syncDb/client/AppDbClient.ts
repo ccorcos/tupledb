@@ -39,24 +39,22 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 		})
 	}
 
-	getSyncDb(path: Tuple): SyncDb {
+	private incSyncDb(path: Tuple): void {
 		const key = JSON.stringify(path)
 		const count = this.scopeRefs.get(key) ?? 0
 
 		if (count === 0) {
 			this.pubsub.subscribe(key)
 			this.subscribedScopes.add(key)
-			this.syncScope(path).catch(() => { })
+			this.syncScope(path).catch(() => { }) // Whats this?
 		}
 
 		this.scopeRefs.set(key, count + 1)
-		return createSyncDb(this, path, () => this.releaseSyncDb(path))
 	}
 
-	private releaseSyncDb(path: Tuple): void {
+	private decSyncDb(path: Tuple): void {
 		const key = JSON.stringify(path)
 		const count = this.scopeRefs.get(key) ?? 0
-
 		if (count <= 1) {
 			this.scopeRefs.delete(key)
 			this.subscribedScopes.delete(key)
@@ -64,6 +62,36 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 		} else {
 			this.scopeRefs.set(key, count - 1)
 		}
+	}
+
+	syncDb(path: Tuple): SyncDbClient {
+		this.incSyncDb(path)
+
+		const dataPrefix = [...path, "data"]
+		const encoder = TupleSubspaceEncoder(dataPrefix)
+		const syncDb: SyncDbClient = {
+			path,
+			destroy: () => this.decSyncDb(path),
+			clock: () => tupleDb(this.cache.data).subspace(path).get(["clock"]) ?? 0,
+
+			list: (args) => {
+				const fullArgs = EncodeSubspaceListArgs(args ?? {}, dataPrefix)
+				const result = this.list(fullArgs)
+				return KeyDecodeList(result, encoder)
+			},
+
+			get: (key) => syncDb.list({ gte: key, lte: key }).at(0)?.value,
+
+			subscribe: (range, fn) => {
+				const fullRange = KeyEncodeRange(range, encoder)
+				return this.subscribe(fullRange, fn)
+			},
+
+			subspace: (prefix) => createSyncDbView(syncDb, prefix),
+
+			sync: () => this.syncScope(path),
+		}
+		return syncDb
 	}
 
 	getPendingCommits(): readonly PendingCommit<R>[] {
@@ -275,57 +303,22 @@ export class AppDbClient<R extends ReducerMap = ReducerMap> {
 	}
 }
 
-export type SyncDbView = {
+export type SyncDbClientView = {
 	list(args?: ListArgs<Tuple>): { key: Tuple; value: JSONValue }[]
 	get(key: Tuple): JSONValue | undefined
 	subscribe(range: Range<Tuple>, fn: () => void): () => void
-	subspace(prefix: Tuple): SyncDbView
+	subspace(prefix: Tuple): SyncDbClientView
 }
 
-export type SyncDb = SyncDbView & {
+export type SyncDbClient = SyncDbClientView & {
 	readonly path: Tuple
 	destroy(): void
 	clock(): number
 	sync(): Promise<void>
 }
 
-function createSyncDb<R extends ReducerMap>(
-	appDb: AppDbClient<R>,
-	path: Tuple,
-	onDestroy: () => void
-): SyncDb {
-	const dataPrefix = [...path, "data"]
-	const encoder = TupleSubspaceEncoder(dataPrefix)
 
-	const syncDb: SyncDb = {
-		path,
-
-		destroy: onDestroy,
-
-		clock: () => appDb.getClock(path),
-
-		list: (args) => {
-			const fullArgs = EncodeSubspaceListArgs(args ?? {}, dataPrefix)
-			const result = appDb.list(fullArgs)
-			return KeyDecodeList(result, encoder)
-		},
-
-		get: (key) => syncDb.list({ gte: key, lte: key }).at(0)?.value,
-
-		subscribe: (range, fn) => {
-			const fullRange = KeyEncodeRange(range, encoder)
-			return appDb.subscribe(fullRange, fn)
-		},
-
-		subspace: (prefix) => createSyncDbView(syncDb, prefix),
-
-		sync: () => appDb.syncScope(path),
-	}
-
-	return syncDb
-}
-
-function createSyncDbView(parent: SyncDbView, prefix: Tuple): SyncDbView {
+function createSyncDbView(parent: SyncDbClientView, prefix: Tuple): SyncDbClientView {
 	const encoder = TupleSubspaceEncoder(prefix)
 
 	return {

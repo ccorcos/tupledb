@@ -146,7 +146,7 @@ describe("AppDbClient", () => {
 		it("starts with empty data before sync completes", () => {
 			server.delay = 100
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 
 			assert.equal(syncDb.clock(), 0)
 			assert.deepEqual(syncDb.list(), [])
@@ -155,7 +155,7 @@ describe("AppDbClient", () => {
 
 		it("implicitly initializes scope on getSyncDb", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 
 			await syncDb.sync()
 
@@ -165,7 +165,7 @@ describe("AppDbClient", () => {
 
 		it("subscribes to pubsub on getSyncDb", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 
 			await syncDb.sync()
@@ -191,8 +191,8 @@ describe("AppDbClient", () => {
 	describe("Reference Counting", () => {
 		it("increments ref count on getSyncDb", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
-			const syncDb2 = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb1 = appDb.syncDb(["todoList", "list-1"])
+			const syncDb2 = appDb.syncDb(["todoList", "list-1"])
 
 			await syncDb1.sync()
 
@@ -205,8 +205,8 @@ describe("AppDbClient", () => {
 
 		it("unsubscribes from pubsub when all refs destroyed", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
-			const syncDb2 = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb1 = appDb.syncDb(["todoList", "list-1"])
+			const syncDb2 = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 
 			await syncDb1.sync()
@@ -228,7 +228,7 @@ describe("AppDbClient", () => {
 
 			// After both destroyed, pubsub should be unsubscribed
 			// Creating a new syncDb should work fresh
-			const syncDb3 = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb3 = appDb.syncDb(["todoList", "list-1"])
 			await syncDb3.sync()
 			assert.equal(getTodos(syncDb3).length, 1)
 			syncDb3.destroy()
@@ -238,7 +238,7 @@ describe("AppDbClient", () => {
 	describe("Commits", () => {
 		it("applies commit optimistically and persists after confirmation", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -262,7 +262,7 @@ describe("AppDbClient", () => {
 
 		it("pending commits are visible during submission", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -293,8 +293,8 @@ describe("AppDbClient", () => {
 
 		it("cross-scope commits affect multiple scopes", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
-			const syncDb2 = appDb.getSyncDb(["todoList", "list-2"])
+			const syncDb1 = appDb.syncDb(["todoList", "list-1"])
+			const syncDb2 = appDb.syncDb(["todoList", "list-2"])
 
 			await syncDb1.sync()
 			await syncDb2.sync()
@@ -329,7 +329,7 @@ describe("AppDbClient", () => {
 	describe("Error Handling", () => {
 		it("marks commit as failed on server error", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -355,7 +355,7 @@ describe("AppDbClient", () => {
 
 		it("can retry failed commits", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -381,7 +381,7 @@ describe("AppDbClient", () => {
 
 		it("can cancel failed commits", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -408,7 +408,7 @@ describe("AppDbClient", () => {
 	describe("SyncDb", () => {
 		it("provides scoped view of data", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -429,7 +429,7 @@ describe("AppDbClient", () => {
 
 		it("can get specific key", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -450,8 +450,8 @@ describe("AppDbClient", () => {
 
 		it("different scopes are isolated", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
-			const syncDb2 = appDb.getSyncDb(["todoList", "list-2"])
+			const syncDb1 = appDb.syncDb(["todoList", "list-1"])
+			const syncDb2 = appDb.syncDb(["todoList", "list-2"])
 
 			await syncDb1.sync()
 			await syncDb2.sync()
@@ -474,7 +474,7 @@ describe("AppDbClient", () => {
 
 		it("subspace provides nested view", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -508,7 +508,7 @@ describe("AppDbClient", () => {
 				changeCount++
 			})
 
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			const list = createList({ id: "list-1" })
 			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
 
@@ -527,7 +527,7 @@ describe("AppDbClient", () => {
 
 		it("data subscriptions notify on data changes", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb1 = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb1 = appDb.syncDb(["todoList", "list-1"])
 
 			let changeCount = 0
 			syncDb1.subscribe({}, () => {
@@ -554,7 +554,7 @@ describe("AppDbClient", () => {
 	describe("Dispose", () => {
 		it("cleans up on dispose", async () => {
 			const appDb = createAppDb(server, client)
-			const syncDb = appDb.getSyncDb(["todoList", "list-1"])
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
 			await syncDb.sync()
 
 			let changeCount = 0

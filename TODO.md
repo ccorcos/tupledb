@@ -24,10 +24,6 @@ garbage collection process. cache subscribed ranges. LRU, wait some time before 
 - rename
 	appDb.getSyncDb(["todoList", listId])
 
-- no initialize...
-	reference count and dispose of syncdbs, there shuold be a registry or something?
-
-	Can you refactor AppDbClient
 
 
 
