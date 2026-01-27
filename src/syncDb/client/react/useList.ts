@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react"
 import { JSONValue, ListArgs, Tuple } from "../../../tupleDb/types"
-import { SyncDbClient, SyncDbClientView } from "../AppDbClient"
+import { LocalResult, SyncDbClient, SyncDbClientView } from "../AppDbClient"
 
 export type UseListResult<T = { key: Tuple; value: JSONValue }> = {
-	data: T[]
+	local: LocalResult<T>
+	remote: Promise<void>
 }
 
 export function useList<T = { key: Tuple; value: JSONValue }>(
@@ -19,12 +20,15 @@ export function useList<T = { key: Tuple; value: JSONValue }>(
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [source, argsKey])
 
-	const data = useMemo(() => {
-		return source.list(args) as T[]
+	const result = useMemo(() => {
+		return source.list(args)
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [source, argsKey, forceUpdate])
 
-	return { data }
+	return {
+		local: result.local as LocalResult<T>,
+		remote: result.remote,
+	}
 }
 
 function argsToRange<K>(args?: ListArgs<K>): { gt?: K; gte?: K; lt?: K; lte?: K } {

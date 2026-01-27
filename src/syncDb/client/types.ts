@@ -1,4 +1,4 @@
-import { ListArgs, Tuple, JSONValue } from "../../tupleDb/types"
+import { ListArgs, Tuple, JSONValue, WriteArgs } from "../../tupleDb/types"
 import { Commit, CommitArgs, Op, ReducerMap } from "../types"
 
 export type PendingCommit<R extends ReducerMap = ReducerMap> = {
@@ -6,8 +6,9 @@ export type PendingCommit<R extends ReducerMap = ReducerMap> = {
 	authorId?: string
 	createdAt: string
 	ops: Op<R>[]
+	writes: WriteArgs<Tuple, JSONValue>
 	localSeq: number
-	status: "pending" | "submitting" | "failed"
+	status: "pending" | "submitting" | "submitted" | "failed"
 	error?: string
 }
 

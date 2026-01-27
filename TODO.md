@@ -6,6 +6,12 @@ HERE: HumanTodoMVC
 - get the client cache working along with sync and test it.
 
 
+TODO: do it yourself. AppDbClient.
+
+
+
+
+
 TODO: see if we can get Claude to massage this thing into a shape we can use. Otherwise, lets continue with TodoMVC.test.ts and createClient and go from there.
 
 AppDbClient
@@ -13,12 +19,9 @@ AppDbClient
 - reference counts subscriptions to clocks
 - applies optimistic writes and rebases
 
-
 garbage collection process. cache subscribed ranges. LRU, wait some time before cleanup.
 
-
-
-
+fetching wiht reference counting and cache invalidation after a timeout.
 
 
 - rename

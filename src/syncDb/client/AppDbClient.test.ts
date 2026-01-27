@@ -7,7 +7,7 @@ import { Tuple, TupleDb } from "../../tupleDb/types"
 import { Todo, TodoList, todoAppReducers } from "../examples/TodoMVC"
 import { syncServer } from "../syncServer"
 import { Commit } from "../types"
-import { AppDbClient } from "./AppDbClient"
+import { AppDbClient, LocalResult } from "./AppDbClient"
 import { AppServerApi } from "./types"
 
 // ============================================================================
@@ -38,10 +38,15 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function getLocalData<T>(local: LocalResult<T>): T[] {
+	return local.hit ?? local.prefix ?? local.miss ?? []
+}
+
 /** Get just the todos from a syncDb (filters out indexes) */
-function getTodos(syncDb: { list: () => { key: Tuple; value: any }[] }): Todo[] {
-	return syncDb
-		.list()
+function getTodos(syncDb: { list: () => { local: LocalResult<{ key: Tuple; value: any }> } }): Todo[] {
+	const { local } = syncDb.list()
+	const data = getLocalData(local)
+	return data
 		.filter((d) => d.key[0] === "todo")
 		.map((d) => d.value as Todo)
 }
@@ -149,7 +154,9 @@ describe("AppDbClient", () => {
 			const syncDb = appDb.syncDb(["todoList", "list-1"])
 
 			assert.equal(syncDb.clock(), 0)
-			assert.deepEqual(syncDb.list(), [])
+			const { local } = syncDb.list()
+			assert.ok(local.miss !== undefined, "Should be a cache miss")
+			assert.deepEqual(local.miss, [])
 			syncDb.destroy()
 		})
 
@@ -400,7 +407,9 @@ describe("AppDbClient", () => {
 			appDb.cancelCommit(pending.id)
 
 			assert.equal(appDb.getPendingCommits().length, 0)
-			assert.equal(syncDb.list().length, 0)
+			const { local } = syncDb.list()
+			const data = getLocalData(local)
+			assert.equal(data.length, 0)
 			syncDb.destroy()
 		})
 	})
@@ -486,7 +495,8 @@ describe("AppDbClient", () => {
 			])
 
 			const todoSubspace = syncDb.subspace(["todo"])
-			const todos = todoSubspace.list()
+			const { local } = todoSubspace.list()
+			const todos = getLocalData(local)
 			assert.equal(todos.length, 1)
 			assert.equal(todos[0].key[0], "todo-1")
 
@@ -578,6 +588,141 @@ describe("AppDbClient", () => {
 			await sleep(10)
 
 			assert.equal(changeCount, countAfterDispose)
+		})
+	})
+
+	describe("Cache State", () => {
+		it("returns miss before sync completes", () => {
+			server.delay = 100
+			const appDb = createAppDb(server, client)
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
+
+			const { local, remote } = syncDb.list()
+			assert.ok(local.miss !== undefined, "Should be a cache miss")
+			assert.deepEqual(local.miss, [])
+			assert.ok(remote instanceof Promise, "remote should be a Promise")
+			syncDb.destroy()
+		})
+
+		it("returns hit after sync completes", async () => {
+			const appDb = createAppDb(server, client)
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
+
+			await syncDb.sync()
+
+			const { local } = syncDb.list()
+			assert.ok(local.hit !== undefined, "Should be a cache hit")
+			syncDb.destroy()
+		})
+
+		it("remote promise resolves when fetch completes", async () => {
+			server.delay = 50
+			const appDb = createAppDb(server, client)
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
+
+			const { local, remote } = syncDb.list()
+			assert.ok(local.miss !== undefined, "Should start as miss")
+
+			await remote
+
+			const { local: localAfter } = syncDb.list()
+			assert.ok(localAfter.hit !== undefined, "Should be hit after remote resolves")
+			syncDb.destroy()
+		})
+
+		it("pending commits visible in miss state", async () => {
+			server.delay = 100
+			const appDb = createAppDb(server, client)
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Pending" })
+
+			// Don't await sync - cache is in miss state
+			appDb.commit([
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
+			])
+
+			const { local } = syncDb.list()
+			assert.ok(local.miss !== undefined, "Should be miss state")
+			const todos = local.miss!.filter((d) => d.key[0] === "todo")
+			assert.equal(todos.length, 1, "Pending commit should be visible in miss")
+			assert.equal(todos[0].value.text, "Pending")
+			syncDb.destroy()
+		})
+
+		it("pending commits merged into hit state", async () => {
+			const appDb = createAppDb(server, client)
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Pending" })
+
+			await syncDb.sync()
+
+			server.delay = 100
+
+			appDb.commit([
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
+			])
+
+			const { local } = syncDb.list()
+			assert.ok(local.hit !== undefined, "Should be hit state")
+			const todos = local.hit!.filter((d) => d.key[0] === "todo")
+			assert.equal(todos.length, 1, "Pending commit should be merged into hit")
+			assert.equal(todos[0].value.text, "Pending")
+
+			await appDb.flush()
+			syncDb.destroy()
+		})
+
+		it("confirmation removes from pending", async () => {
+			const appDb = createAppDb(server, client)
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
+			await syncDb.sync()
+
+			appDb.commit([
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
+			])
+
+			assert.equal(appDb.getPendingCommits().length, 1)
+
+			await appDb.flush()
+
+			assert.equal(appDb.getPendingCommits().length, 0)
+
+			// Data should still be visible after confirmation
+			const todos = getTodos(syncDb)
+			assert.equal(todos.length, 1)
+			syncDb.destroy()
+		})
+
+		it("cache state propagates through subspace views", async () => {
+			const appDb = createAppDb(server, client)
+			const syncDb = appDb.syncDb(["todoList", "list-1"])
+			const list = createList({ id: "list-1" })
+			const todo = createTodo("list-1", { id: "todo-1", text: "Test" })
+
+			await syncDb.sync()
+
+			appDb.commit([
+				{ fn: "setList", args: [list] },
+				{ fn: "addTodo", args: [todo] },
+			])
+
+			const todoSubspace = syncDb.subspace(["todo"])
+			const { local, remote } = todoSubspace.list()
+
+			assert.ok(local.hit !== undefined, "Subspace should inherit hit state")
+			assert.ok(remote instanceof Promise, "Subspace should have remote promise")
+			assert.equal(local.hit!.length, 1)
+
+			await appDb.flush()
+			syncDb.destroy()
 		})
 	})
 })
